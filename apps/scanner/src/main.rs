@@ -52,6 +52,23 @@ enum Commands {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+
+    /// Clasifica el diff como hallazgos iniciales de Security Drift
+    Drift {
+        /// Snapshot anterior
+        older: PathBuf,
+
+        /// Snapshot más reciente
+        newer: PathBuf,
+
+        /// Imprime el reporte de drift en JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Guarda el reporte de drift JSON en un archivo
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -95,6 +112,24 @@ async fn main() -> Result<()> {
                 atlas_output::write_json_output(&report, output.as_deref())?;
             } else {
                 print_human_diff_report(&report);
+            }
+        }
+
+        Commands::Drift {
+            older,
+            newer,
+            json,
+            output,
+        } => {
+            let older_snapshot = atlas_snapshot::load_snapshot(&older)?;
+            let newer_snapshot = atlas_snapshot::load_snapshot(&newer)?;
+            let diff = atlas_diff::diff_snapshots(&older_snapshot, &newer_snapshot);
+            let drift = atlas_drift::analyze_diff(&diff);
+
+            if json {
+                atlas_output::write_json_output(&drift, output.as_deref())?;
+            } else {
+                print_human_drift_report(&drift);
             }
         }
     }
@@ -199,5 +234,35 @@ fn print_human_diff_report(report: &atlas_diff::DiffReport) {
     if !report.has_changes() {
         println!();
         println!("No se detectaron cambios entre snapshots.");
+    }
+}
+
+fn print_human_drift_report(report: &atlas_drift::DriftReport) {
+    println!("Target: {}", report.target);
+    println!("Snapshot anterior: {}", report.older_timestamp);
+    println!("Snapshot actual:   {}", report.newer_timestamp);
+    println!("Hallazgos: {}", report.findings.len());
+
+    println!();
+    println!("Resumen por severidad:");
+    println!("  - High: {}", report.summary.high);
+    println!("  - Medium: {}", report.summary.medium);
+    println!("  - Low: {}", report.summary.low);
+    println!("  - Info: {}", report.summary.info);
+
+    if report.findings.is_empty() {
+        println!();
+        println!("No se detectaron hallazgos de Security Drift.");
+        return;
+    }
+
+    println!();
+    println!("Hallazgos:");
+    for finding in &report.findings {
+        println!(
+            "  - [{}] {} | categoría={} | recurso={}",
+            finding.severity, finding.title, finding.category, finding.resource
+        );
+        println!("      {}", finding.description);
     }
 }

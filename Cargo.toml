@@ -9,6 +9,7 @@ members = [
     "crates/atlas-snapshot",
     "crates/atlas-output",
     "crates/atlas-diff",
+    "crates/atlas-drift",
 ]
 
 [workspace.package]

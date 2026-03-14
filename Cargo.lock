@@ -74,6 +74,7 @@ dependencies = [
  "anyhow",
  "atlas-diff",
  "atlas-discovery",
+ "atlas-drift",
  "atlas-output",
  "atlas-snapshot",
  "clap",
@@ -115,6 +116,16 @@ dependencies = [
  "anyhow",
  "futures",
  "tokio",
+]
+
+[[package]]
+name = "atlas-drift"
+version = "0.1.0"
+dependencies = [
+ "atlas-core",
+ "atlas-diff",
+ "chrono",
+ "serde",
 ]
 
 [[package]]
