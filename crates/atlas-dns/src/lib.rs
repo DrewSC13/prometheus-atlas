@@ -28,7 +28,11 @@ pub async fn enumerate_common_subdomains(domain: &str) -> Vec<String> {
                 Err(_) => false,
             };
 
-            if exists { Some(fqdn) } else { None }
+            if exists {
+                Some(fqdn)
+            } else {
+                None
+            }
         }
     });
 

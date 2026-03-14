@@ -6,19 +6,23 @@ members = [
     "crates/atlas-dns",
     "crates/atlas-http",
     "crates/atlas-discovery",
+    "crates/atlas-snapshot",
+    "crates/atlas-output",
+    "crates/atlas-diff",
 ]
 
 [workspace.package]
-edition = "2024"
+edition = "2021"
 license = "Apache-2.0"
 authors = ["Claudio Andres Sanjines Cuellar"]
 repository = "https://github.com/DrewSC13/prometheus-atlas"
 
 [workspace.dependencies]
 anyhow = "1"
-tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
+futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-futures = "0.3"
+chrono = { version = "0.4", features = ["clock", "serde"] }

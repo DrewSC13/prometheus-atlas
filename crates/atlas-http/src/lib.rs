@@ -1,7 +1,7 @@
 use atlas_core::HttpService;
 use futures::future::join_all;
-use reqwest::Client;
 use reqwest::header::SERVER;
+use reqwest::Client;
 use std::time::Duration;
 
 pub async fn probe_hosts(hosts: &[String]) -> Vec<HttpService> {

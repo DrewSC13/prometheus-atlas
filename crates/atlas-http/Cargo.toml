@@ -11,4 +11,5 @@ anyhow.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 futures.workspace = true
+
 atlas-core = { path = "../atlas-core" }

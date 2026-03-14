@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+
 atlas-core = { path = "../atlas-core" }
 atlas-dns = { path = "../atlas-dns" }
 atlas-http = { path = "../atlas-http" }

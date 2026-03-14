@@ -126,6 +126,7 @@ keys/
 data/
 datasets/
 snapshots/
+.snapshots/
 
 ########################################
 # Archivos de pruebas temporales
@@ -133,6 +134,7 @@ snapshots/
 
 coverage/
 *.prof
+example.json
 
 ########################################
 # Terraform / Infraestructura

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::fs;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "atlas")]
@@ -12,14 +12,28 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Ejecuta un escaneo de descubrimiento sobre un objetivo
     Scan {
+        /// Dominio objetivo
         target: String,
 
+        /// Imprime el resultado en JSON
         #[arg(long)]
         json: bool,
 
+        /// Guarda la salida JSON en un archivo
         #[arg(long)]
-        output: Option<String>,
+        output: Option<PathBuf>,
+    },
+
+    /// Ejecuta un escaneo y guarda un snapshot en disco
+    Snapshot {
+        /// Dominio objetivo
+        target: String,
+
+        /// Directorio base donde se almacenarán los snapshots
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
     },
 }
 
@@ -36,35 +50,18 @@ async fn main() -> Result<()> {
             let result = atlas_discovery::scan_target(&target).await?;
 
             if json {
-                let rendered = serde_json::to_string_pretty(&result)?;
-
-                if let Some(path) = output {
-                    fs::write(path, rendered)?;
-                } else {
-                    println!("{rendered}");
-                }
+                atlas_output::write_json_output(&result, output.as_deref())?;
             } else {
-                println!("Target: {}", result.target);
-                println!("IPs resueltas: {}", result.resolved_ips.len());
-
-                for ip in &result.resolved_ips {
-                    println!("  - {ip}");
-                }
-
-                println!("Subdominios descubiertos: {}", result.subdomains.len());
-                for sub in &result.subdomains {
-                    println!("  - {sub}");
-                }
-
-                println!("Servicios HTTP detectados: {}", result.services.len());
-                for service in &result.services {
-                    let server = service.server.as_deref().unwrap_or("desconocido");
-                    println!(
-                        "  - {} [{}] status={} server={}",
-                        service.url, service.scheme, service.status, server
-                    );
-                }
+                atlas_output::print_human_scan_result(&result);
             }
+        }
+
+        Commands::Snapshot { target, dir } => {
+            let result = atlas_discovery::scan_target(&target).await?;
+            let snapshot = atlas_snapshot::Snapshot::new(result);
+            let path = atlas_snapshot::save_snapshot(&snapshot, &dir)?;
+
+            println!("Snapshot guardado en: {}", path.display());
         }
     }
 
