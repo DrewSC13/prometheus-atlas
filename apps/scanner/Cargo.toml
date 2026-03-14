@@ -1,9 +1,14 @@
 [package]
 name = "atlas"
 version = "0.1.0"
-edition = "2021"
-authors = ["Claudio Andres Sanjines Cuellar"]
-license = "Apache-2.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+atlas-discovery = { path = "../../crates/atlas-discovery" }

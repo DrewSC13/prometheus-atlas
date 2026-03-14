@@ -1,12 +1,24 @@
 [workspace]
 resolver = "2"
-
 members = [
     "apps/scanner",
+    "crates/atlas-core",
+    "crates/atlas-dns",
+    "crates/atlas-http",
+    "crates/atlas-discovery",
 ]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 authors = ["Claudio Andres Sanjines Cuellar"]
 repository = "https://github.com/DrewSC13/prometheus-atlas"
+
+[workspace.dependencies]
+anyhow = "1"
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+futures = "0.3"
