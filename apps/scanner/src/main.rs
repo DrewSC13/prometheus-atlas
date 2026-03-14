@@ -53,13 +53,17 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    /// Clasifica el diff como hallazgos iniciales de Security Drift
+    /// Clasifica el diff como hallazgos de Security Drift
     Drift {
         /// Snapshot anterior
         older: PathBuf,
 
         /// Snapshot más reciente
         newer: PathBuf,
+
+        /// Política de baseline / allowlist en JSON
+        #[arg(long)]
+        policy: Option<PathBuf>,
 
         /// Imprime el reporte de drift en JSON
         #[arg(long)]
@@ -118,13 +122,20 @@ async fn main() -> Result<()> {
         Commands::Drift {
             older,
             newer,
+            policy,
             json,
             output,
         } => {
             let older_snapshot = atlas_snapshot::load_snapshot(&older)?;
             let newer_snapshot = atlas_snapshot::load_snapshot(&newer)?;
             let diff = atlas_diff::diff_snapshots(&older_snapshot, &newer_snapshot);
-            let drift = atlas_drift::analyze_diff(&diff);
+
+            let policy = match policy {
+                Some(path) => Some(atlas_drift::DriftPolicy::load_from_path(&path)?),
+                None => None,
+            };
+
+            let drift = atlas_drift::analyze_diff_with_policy(&diff, policy.as_ref());
 
             if json {
                 atlas_output::write_json_output(&drift, output.as_deref())?;
@@ -250,6 +261,18 @@ fn print_human_drift_report(report: &atlas_drift::DriftReport) {
     println!("  - Low: {}", report.summary.low);
     println!("  - Info: {}", report.summary.info);
 
+    println!();
+    println!("Score total: {}", report.summary.total_score);
+    println!("Severidad global: {}", report.summary.overall_severity);
+
+    if !report.suppressed_findings.is_empty() {
+        println!();
+        println!(
+            "Hallazgos suprimidos por baseline/policy: {}",
+            report.suppressed_findings.len()
+        );
+    }
+
     if report.findings.is_empty() {
         println!();
         println!("No se detectaron hallazgos de Security Drift.");
@@ -257,12 +280,23 @@ fn print_human_drift_report(report: &atlas_drift::DriftReport) {
     }
 
     println!();
-    println!("Hallazgos:");
-    for finding in &report.findings {
+    println!("Hallazgos agrupados por recurso:");
+    for group in &report.groups {
         println!(
-            "  - [{}] {} | categoría={} | recurso={}",
-            finding.severity, finding.title, finding.category, finding.resource
+            "  - recurso={} | severidad={} | score={}",
+            group.resource, group.highest_severity, group.total_score
         );
-        println!("      {}", finding.description);
+
+        for finding in &group.findings {
+            println!(
+                "      [{}] {} | categoría={} | entorno={} | score={}",
+                finding.severity,
+                finding.title,
+                finding.category,
+                finding.environment,
+                finding.score
+            );
+            println!("          {}", finding.description);
+        }
     }
 }

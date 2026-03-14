@@ -122,10 +122,12 @@ dependencies = [
 name = "atlas-drift"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "atlas-core",
  "atlas-diff",
  "chrono",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
