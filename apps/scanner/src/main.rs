@@ -35,6 +35,23 @@ enum Commands {
         #[arg(long, default_value = ".snapshots")]
         dir: PathBuf,
     },
+
+    /// Compara dos snapshots y muestra las diferencias
+    Diff {
+        /// Snapshot anterior
+        older: PathBuf,
+
+        /// Snapshot más reciente
+        newer: PathBuf,
+
+        /// Imprime el diff en JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Guarda el diff JSON en un archivo
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -63,7 +80,124 @@ async fn main() -> Result<()> {
 
             println!("Snapshot guardado en: {}", path.display());
         }
+
+        Commands::Diff {
+            older,
+            newer,
+            json,
+            output,
+        } => {
+            let older_snapshot = atlas_snapshot::load_snapshot(&older)?;
+            let newer_snapshot = atlas_snapshot::load_snapshot(&newer)?;
+            let report = atlas_diff::diff_snapshots(&older_snapshot, &newer_snapshot);
+
+            if json {
+                atlas_output::write_json_output(&report, output.as_deref())?;
+            } else {
+                print_human_diff_report(&report);
+            }
+        }
     }
 
     Ok(())
+}
+
+fn print_human_diff_report(report: &atlas_diff::DiffReport) {
+    println!("Target: {}", report.target);
+    println!("Snapshot anterior: {}", report.older_timestamp);
+    println!("Snapshot actual:   {}", report.newer_timestamp);
+
+    println!();
+    println!("Resumen:");
+    println!("  - IPs nuevas: {}", report.new_ips.len());
+    println!("  - IPs removidas: {}", report.removed_ips.len());
+    println!("  - Subdominios nuevos: {}", report.new_subdomains.len());
+    println!(
+        "  - Subdominios removidos: {}",
+        report.removed_subdomains.len()
+    );
+    println!("  - Servicios nuevos: {}", report.new_services.len());
+    println!("  - Servicios removidos: {}", report.removed_services.len());
+    println!(
+        "  - Servicios modificados: {}",
+        report.changed_services.len()
+    );
+
+    if !report.new_ips.is_empty() {
+        println!();
+        println!("IPs nuevas:");
+        for ip in &report.new_ips {
+            println!("  + {ip}");
+        }
+    }
+
+    if !report.removed_ips.is_empty() {
+        println!();
+        println!("IPs removidas:");
+        for ip in &report.removed_ips {
+            println!("  - {ip}");
+        }
+    }
+
+    if !report.new_subdomains.is_empty() {
+        println!();
+        println!("Subdominios nuevos:");
+        for sub in &report.new_subdomains {
+            println!("  + {sub}");
+        }
+    }
+
+    if !report.removed_subdomains.is_empty() {
+        println!();
+        println!("Subdominios removidos:");
+        for sub in &report.removed_subdomains {
+            println!("  - {sub}");
+        }
+    }
+
+    if !report.new_services.is_empty() {
+        println!();
+        println!("Servicios nuevos:");
+        for service in &report.new_services {
+            let server = service.server.as_deref().unwrap_or("desconocido");
+            println!(
+                "  + {} [{}] status={} server={}",
+                service.url, service.scheme, service.status, server
+            );
+        }
+    }
+
+    if !report.removed_services.is_empty() {
+        println!();
+        println!("Servicios removidos:");
+        for service in &report.removed_services {
+            let server = service.server.as_deref().unwrap_or("desconocido");
+            println!(
+                "  - {} [{}] status={} server={}",
+                service.url, service.scheme, service.status, server
+            );
+        }
+    }
+
+    if !report.changed_services.is_empty() {
+        println!();
+        println!("Servicios modificados:");
+        for change in &report.changed_services {
+            println!("  * {}", change.url);
+            println!(
+                "      status: {} -> {}",
+                change.before_status, change.after_status
+            );
+            println!(
+                "      server: {} -> {}",
+                change.before_server.as_deref().unwrap_or("desconocido"),
+                change.after_server.as_deref().unwrap_or("desconocido")
+            );
+        }
+    }
+
+    if !report.has_changes() {
+        println!();
+        println!("No se detectaron cambios entre snapshots.");
+    }
 }

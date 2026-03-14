@@ -134,7 +134,7 @@ snapshots/
 
 coverage/
 *.prof
-example.json
+*.json
 
 ########################################
 # Terraform / Infraestructura

@@ -72,6 +72,7 @@ name = "atlas"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "atlas-diff",
  "atlas-discovery",
  "atlas-output",
  "atlas-snapshot",
@@ -90,6 +91,12 @@ dependencies = [
 [[package]]
 name = "atlas-diff"
 version = "0.1.0"
+dependencies = [
+ "atlas-core",
+ "atlas-snapshot",
+ "chrono",
+ "serde",
+]
 
 [[package]]
 name = "atlas-discovery"

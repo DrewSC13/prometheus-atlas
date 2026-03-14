@@ -15,3 +15,4 @@ serde_json.workspace = true
 atlas-discovery = { path = "../../crates/atlas-discovery" }
 atlas-output = { path = "../../crates/atlas-output" }
 atlas-snapshot = { path = "../../crates/atlas-snapshot" }
+atlas-diff = { path = "../../crates/atlas-diff" }
