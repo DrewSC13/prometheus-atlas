@@ -125,6 +125,7 @@ dependencies = [
  "anyhow",
  "atlas-core",
  "atlas-diff",
+ "atlas-snapshot",
  "chrono",
  "serde",
  "serde_json",

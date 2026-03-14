@@ -78,3 +78,16 @@ pub fn list_snapshots_for_target(base_dir: &Path, target: &str) -> Result<Vec<Pa
 
     Ok(entries)
 }
+
+pub fn load_all_snapshots_for_target(base_dir: &Path, target: &str) -> Result<Vec<Snapshot>> {
+    let paths = list_snapshots_for_target(base_dir, target)?;
+    let mut snapshots = Vec::new();
+
+    for path in paths {
+        snapshots.push(load_snapshot(&path)?);
+    }
+
+    snapshots.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+    Ok(snapshots)
+}

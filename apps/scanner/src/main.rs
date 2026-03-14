@@ -12,64 +12,60 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Ejecuta un escaneo de descubrimiento sobre un objetivo
     Scan {
-        /// Dominio objetivo
         target: String,
 
-        /// Imprime el resultado en JSON
         #[arg(long)]
         json: bool,
 
-        /// Guarda la salida JSON en un archivo
         #[arg(long)]
         output: Option<PathBuf>,
     },
 
-    /// Ejecuta un escaneo y guarda un snapshot en disco
     Snapshot {
-        /// Dominio objetivo
         target: String,
 
-        /// Directorio base donde se almacenarán los snapshots
         #[arg(long, default_value = ".snapshots")]
         dir: PathBuf,
     },
 
-    /// Compara dos snapshots y muestra las diferencias
     Diff {
-        /// Snapshot anterior
         older: PathBuf,
-
-        /// Snapshot más reciente
         newer: PathBuf,
 
-        /// Imprime el diff en JSON
         #[arg(long)]
         json: bool,
 
-        /// Guarda el diff JSON en un archivo
         #[arg(long)]
         output: Option<PathBuf>,
     },
 
-    /// Clasifica el diff como hallazgos de Security Drift
     Drift {
-        /// Snapshot anterior
         older: PathBuf,
-
-        /// Snapshot más reciente
         newer: PathBuf,
 
-        /// Política de baseline / allowlist en JSON
         #[arg(long)]
         policy: Option<PathBuf>,
 
-        /// Imprime el reporte de drift en JSON
         #[arg(long)]
         json: bool,
 
-        /// Guarda el reporte de drift JSON en un archivo
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    Timeline {
+        target: String,
+
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        #[arg(long)]
+        json: bool,
+
         #[arg(long)]
         output: Option<PathBuf>,
     },
@@ -143,6 +139,30 @@ async fn main() -> Result<()> {
                 print_human_drift_report(&drift);
             }
         }
+
+        Commands::Timeline {
+            target,
+            dir,
+            policy,
+            json,
+            output,
+        } => {
+            let snapshots = atlas_snapshot::load_all_snapshots_for_target(&dir, &target)?;
+
+            let policy = match policy {
+                Some(path) => Some(atlas_drift::DriftPolicy::load_from_path(&path)?),
+                None => None,
+            };
+
+            let timeline =
+                atlas_drift::build_timeline_report(&target, &snapshots, policy.as_ref())?;
+
+            if json {
+                atlas_output::write_json_output(&timeline, output.as_deref())?;
+            } else {
+                print_human_timeline_report(&timeline);
+            }
+        }
     }
 
     Ok(())
@@ -168,79 +188,6 @@ fn print_human_diff_report(report: &atlas_diff::DiffReport) {
         "  - Servicios modificados: {}",
         report.changed_services.len()
     );
-
-    if !report.new_ips.is_empty() {
-        println!();
-        println!("IPs nuevas:");
-        for ip in &report.new_ips {
-            println!("  + {ip}");
-        }
-    }
-
-    if !report.removed_ips.is_empty() {
-        println!();
-        println!("IPs removidas:");
-        for ip in &report.removed_ips {
-            println!("  - {ip}");
-        }
-    }
-
-    if !report.new_subdomains.is_empty() {
-        println!();
-        println!("Subdominios nuevos:");
-        for sub in &report.new_subdomains {
-            println!("  + {sub}");
-        }
-    }
-
-    if !report.removed_subdomains.is_empty() {
-        println!();
-        println!("Subdominios removidos:");
-        for sub in &report.removed_subdomains {
-            println!("  - {sub}");
-        }
-    }
-
-    if !report.new_services.is_empty() {
-        println!();
-        println!("Servicios nuevos:");
-        for service in &report.new_services {
-            let server = service.server.as_deref().unwrap_or("desconocido");
-            println!(
-                "  + {} [{}] status={} server={}",
-                service.url, service.scheme, service.status, server
-            );
-        }
-    }
-
-    if !report.removed_services.is_empty() {
-        println!();
-        println!("Servicios removidos:");
-        for service in &report.removed_services {
-            let server = service.server.as_deref().unwrap_or("desconocido");
-            println!(
-                "  - {} [{}] status={} server={}",
-                service.url, service.scheme, service.status, server
-            );
-        }
-    }
-
-    if !report.changed_services.is_empty() {
-        println!();
-        println!("Servicios modificados:");
-        for change in &report.changed_services {
-            println!("  * {}", change.url);
-            println!(
-                "      status: {} -> {}",
-                change.before_status, change.after_status
-            );
-            println!(
-                "      server: {} -> {}",
-                change.before_server.as_deref().unwrap_or("desconocido"),
-                change.after_server.as_deref().unwrap_or("desconocido")
-            );
-        }
-    }
 
     if !report.has_changes() {
         println!();
@@ -297,6 +244,64 @@ fn print_human_drift_report(report: &atlas_drift::DriftReport) {
                 finding.score
             );
             println!("          {}", finding.description);
+        }
+    }
+}
+
+fn print_human_timeline_report(report: &atlas_drift::TimelineReport) {
+    println!("Target: {}", report.target);
+    println!("Snapshots procesados: {}", report.snapshot_count);
+    println!("Transiciones analizadas: {}", report.transition_count);
+
+    println!();
+    println!("Resumen ejecutivo:");
+    println!("  - Score acumulado: {}", report.executive.total_score);
+    println!(
+        "  - Severidad global: {}",
+        report.executive.overall_severity
+    );
+    println!(
+        "  - Hallazgos acumulados: {}",
+        report.executive.total_findings
+    );
+    println!(
+        "  - Recursos únicos afectados: {}",
+        report.executive.unique_resources
+    );
+
+    if !report.executive.top_resources.is_empty() {
+        println!();
+        println!("Recursos más problemáticos:");
+        for item in &report.executive.top_resources {
+            println!(
+                "  - {} | score={} | ocurrencias={}",
+                item.resource, item.total_score, item.occurrences
+            );
+        }
+    }
+
+    if !report.executive.top_categories.is_empty() {
+        println!();
+        println!("Categorías más frecuentes:");
+        for item in &report.executive.top_categories {
+            println!(
+                "  - {} | ocurrencias={} | score={}",
+                item.category, item.occurrences, item.total_score
+            );
+        }
+    }
+
+    if !report.transitions.is_empty() {
+        println!();
+        println!("Transiciones:");
+        for transition in &report.transitions {
+            println!(
+                "  - {} -> {} | hallazgos={} | score={}",
+                transition.older_timestamp,
+                transition.newer_timestamp,
+                transition.report.findings.len(),
+                transition.report.summary.total_score
+            );
         }
     }
 }

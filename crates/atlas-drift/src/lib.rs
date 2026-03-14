@@ -1,8 +1,9 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use atlas_diff::{DiffReport, ServiceChange};
+use atlas_snapshot::Snapshot;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -104,6 +105,46 @@ pub struct DriftReport {
 pub struct DriftPolicy {
     pub allowlisted_resources: Vec<String>,
     pub allowlisted_categories: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineTransition {
+    pub older_timestamp: DateTime<Utc>,
+    pub newer_timestamp: DateTime<Utc>,
+    pub report: DriftReport,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceAggregate {
+    pub resource: String,
+    pub occurrences: usize,
+    pub total_score: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryAggregate {
+    pub category: String,
+    pub occurrences: usize,
+    pub total_score: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineExecutiveSummary {
+    pub total_score: u32,
+    pub overall_severity: Severity,
+    pub total_findings: usize,
+    pub unique_resources: usize,
+    pub top_resources: Vec<ResourceAggregate>,
+    pub top_categories: Vec<CategoryAggregate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimelineReport {
+    pub target: String,
+    pub snapshot_count: usize,
+    pub transition_count: usize,
+    pub transitions: Vec<TimelineTransition>,
+    pub executive: TimelineExecutiveSummary,
 }
 
 impl DriftPolicy {
@@ -224,6 +265,111 @@ pub fn analyze_diff_with_policy(diff: &DiffReport, policy: Option<&DriftPolicy>)
         suppressed_findings,
         groups,
         summary,
+    }
+}
+
+pub fn build_timeline_report(
+    target: &str,
+    snapshots: &[Snapshot],
+    policy: Option<&DriftPolicy>,
+) -> Result<TimelineReport> {
+    if snapshots.len() < 2 {
+        bail!("se requieren al menos 2 snapshots para construir un timeline");
+    }
+
+    let mut transitions = Vec::new();
+
+    for pair in snapshots.windows(2) {
+        let older = &pair[0];
+        let newer = &pair[1];
+
+        let diff = atlas_diff::diff_snapshots(older, newer);
+        let report = analyze_diff_with_policy(&diff, policy);
+
+        transitions.push(TimelineTransition {
+            older_timestamp: older.timestamp,
+            newer_timestamp: newer.timestamp,
+            report,
+        });
+    }
+
+    let executive = build_executive_summary(&transitions);
+
+    Ok(TimelineReport {
+        target: target.to_string(),
+        snapshot_count: snapshots.len(),
+        transition_count: transitions.len(),
+        transitions,
+        executive,
+    })
+}
+
+fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecutiveSummary {
+    let mut total_score = 0;
+    let mut total_findings = 0;
+    let mut unique_resources = BTreeSet::new();
+
+    let mut resource_map: BTreeMap<String, ResourceAggregate> = BTreeMap::new();
+    let mut category_map: BTreeMap<String, CategoryAggregate> = BTreeMap::new();
+
+    for transition in transitions {
+        total_score += transition.report.summary.total_score;
+        total_findings += transition.report.findings.len();
+
+        for finding in &transition.report.findings {
+            unique_resources.insert(finding.resource.clone());
+
+            resource_map
+                .entry(finding.resource.clone())
+                .and_modify(|entry| {
+                    entry.occurrences += 1;
+                    entry.total_score += finding.score;
+                })
+                .or_insert(ResourceAggregate {
+                    resource: finding.resource.clone(),
+                    occurrences: 1,
+                    total_score: finding.score,
+                });
+
+            category_map
+                .entry(finding.category.clone())
+                .and_modify(|entry| {
+                    entry.occurrences += 1;
+                    entry.total_score += finding.score;
+                })
+                .or_insert(CategoryAggregate {
+                    category: finding.category.clone(),
+                    occurrences: 1,
+                    total_score: finding.score,
+                });
+        }
+    }
+
+    let overall_severity = if total_score >= 300 {
+        Severity::High
+    } else if total_score >= 150 {
+        Severity::Medium
+    } else if total_score >= 30 {
+        Severity::Low
+    } else {
+        Severity::Info
+    };
+
+    let mut top_resources: Vec<_> = resource_map.into_values().collect();
+    top_resources.sort_by(|a, b| b.total_score.cmp(&a.total_score));
+    top_resources.truncate(5);
+
+    let mut top_categories: Vec<_> = category_map.into_values().collect();
+    top_categories.sort_by(|a, b| b.total_score.cmp(&a.total_score));
+    top_categories.truncate(5);
+
+    TimelineExecutiveSummary {
+        total_score,
+        overall_severity,
+        total_findings,
+        unique_resources: unique_resources.len(),
+        top_resources,
+        top_categories,
     }
 }
 
@@ -472,8 +618,7 @@ fn matches_resource(pattern: &str, resource: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas_core::HttpService;
-    use atlas_diff::DiffReport;
+    use atlas_core::{HttpService, ScanResult};
     use chrono::Utc;
 
     fn empty_diff() -> DiffReport {
@@ -488,6 +633,19 @@ mod tests {
             new_services: Vec::new(),
             removed_services: Vec::new(),
             changed_services: Vec::new(),
+        }
+    }
+
+    fn snapshot_with_target(target: &str) -> Snapshot {
+        Snapshot {
+            timestamp: Utc::now(),
+            target: target.to_string(),
+            scan: ScanResult {
+                target: target.to_string(),
+                resolved_ips: Vec::new(),
+                subdomains: Vec::new(),
+                services: Vec::new(),
+            },
         }
     }
 
@@ -570,5 +728,23 @@ mod tests {
 
         assert!(!report.groups.is_empty());
         assert!(report.summary.total_score > 0);
+    }
+
+    #[test]
+    fn builds_timeline_report() {
+        let mut s1 = snapshot_with_target("example.com");
+        let mut s2 = snapshot_with_target("example.com");
+        let s3 = snapshot_with_target("example.com");
+
+        s1.timestamp = Utc::now();
+        s2.timestamp = s1.timestamp + chrono::Duration::minutes(5);
+
+        s2.scan.subdomains.push("admin.example.com".to_string());
+
+        let report = build_timeline_report("example.com", &[s1.clone(), s2.clone(), s3], None)
+            .expect("timeline report should be built");
+
+        assert_eq!(report.snapshot_count, 3);
+        assert_eq!(report.transition_count, 2);
     }
 }

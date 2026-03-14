@@ -14,3 +14,4 @@ chrono.workspace = true
 
 atlas-diff = { path = "../atlas-diff" }
 atlas-core = { path = "../atlas-core" }
+atlas-snapshot = { path = "../atlas-snapshot" }
