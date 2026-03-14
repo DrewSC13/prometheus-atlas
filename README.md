@@ -1,169 +1,179 @@
+# README.md
+
 # Prometheus Atlas
 
-**Security Drift Intelligence for Cloud-Native Infrastructure**
+**Inteligencia de Deriva de Seguridad para Infraestructura Cloud-Native**
 
-Prometheus Atlas is a cybersecurity platform designed to detect **security drift** in modern infrastructure.  
-Instead of only identifying vulnerabilities or exposed assets, Prometheus Atlas focuses on understanding **how infrastructure changes over time and how those changes introduce new security risks.**
+Prometheus Atlas es una plataforma de ciberseguridad diseñada para detectar **deriva de seguridad (Security Drift)** en infraestructuras modernas.
 
-Modern cloud environments change continuously:
+En lugar de limitarse a identificar vulnerabilidades o activos expuestos, Prometheus Atlas se enfoca en entender **cómo cambia la infraestructura a lo largo del tiempo y cómo esos cambios introducen nuevos riesgos de seguridad**.
 
-- new services
-- new subdomains
-- new APIs
-- new deployments
-- new infrastructure components
-- new access paths
+Las infraestructuras cloud modernas cambian constantemente:
 
-These changes often introduce **silent security degradation** that traditional security tools fail to explain.
+- nuevos servicios
+- nuevas APIs
+- nuevos subdominios
+- nuevos recursos cloud
+- nuevos despliegues
+- nuevas rutas entre servicios
 
-Prometheus Atlas aims to solve this problem.
+Estos cambios suelen generar **degradación silenciosa de la seguridad**, algo que las herramientas tradicionales rara vez detectan o explican correctamente.
 
----
-
-# The Core Idea
-
-Traditional security tools answer questions like:
-
-- What vulnerabilities exist?
-- What assets are exposed?
-- What configurations are incorrect?
-
-Prometheus Atlas answers a different question:
-
-> **What changed in my infrastructure, and why does that change matter for security?**
-
-This concept defines a new category:
-
-**Security Drift Intelligence**
+Prometheus Atlas busca resolver este problema.
 
 ---
 
-# Key Capabilities (Vision)
+# Concepto Central
 
-Prometheus Atlas combines several capabilities into a single platform:
+Las herramientas tradicionales de seguridad responden preguntas como:
 
-- Autonomous asset discovery
-- Live infrastructure graph
-- Dynamic security baselines
-- Drift detection
-- Context-aware risk scoring
-- CI/CD and Infrastructure-as-Code correlation
+- ¿Qué vulnerabilidades existen?
+- ¿Qué activos están expuestos?
+- ¿Qué configuraciones son inseguras?
 
-The platform aims to transform raw infrastructure signals into **actionable security intelligence.**
+Prometheus Atlas responde una pregunta diferente:
 
----
+> ¿Qué cambió en mi infraestructura y por qué ese cambio importa para la seguridad?
 
-# Repository Structure
+Este enfoque define una nueva categoría:
 
-This repository follows a **monorepo architecture** built around a Rust workspace.
-
-
-prometheus-atlas/
-│
-├── apps/
-│ └── scanner/ # CLI tool (atlas)
-│
-├── crates/
-│ ├── atlas-core
-│ ├── atlas-discovery
-│ ├── atlas-snapshot
-│ ├── atlas-diff
-│ └── atlas-output
-│
-├── docs/ # Architecture, vision, and roadmap
-├── infra/ # Future infrastructure and deployment
-├── examples/
-└── tests/
-
-
-The first component being developed is the **Prometheus Atlas Scanner**, a CLI tool designed to:
-
-- discover assets
-- generate infrastructure snapshots
-- detect changes between snapshots
-- surface potential security drift
+**Security Drift Intelligence (Inteligencia de Deriva de Seguridad)**
 
 ---
 
-# Atlas CLI (Planned)
+# Capacidades Principales (Visión)
 
-The primary interface will be a command-line tool:
+Prometheus Atlas combinará múltiples capacidades en una sola plataforma:
 
+- descubrimiento automático de activos
+- modelado de infraestructura mediante grafos
+- baselines dinámicos de seguridad
+- detección de deriva
+- priorización contextual del riesgo
+- correlación con CI/CD e Infrastructure-as-Code
 
-atlas scan example.com
-atlas snapshot save
-atlas diff snapshot_old.json snapshot_new.json
-
-
-This tool will serve as the foundation for:
-
-- the Prometheus Atlas platform
-- the drift intelligence engine
-- future SaaS capabilities
+La plataforma transformará señales de infraestructura en **inteligencia de seguridad accionable**.
 
 ---
 
-# Technology Stack
+# Estructura del Repositorio
 
-Core technologies used in the project include:
+Este repositorio utiliza una arquitectura **monorepo basada en un workspace de Rust**.
 
-- **Rust** – high-performance scanning and collectors
-- **Python** – data processing, correlation, drift intelligence
-- **Graph databases** – infrastructure relationship modeling
-- **ClickHouse** – event storage and analytics
-- **NATS** – event-driven architecture
-- **Next.js** – future platform interface
-
----
-
-# Project Status
-
-🚧 Early development stage.
-
-The first milestone focuses on building the **Atlas Scanner MVP** with:
-
-- passive discovery
-- infrastructure snapshots
-- drift detection
-- JSON export
-
----
-
-# Security
-
-This project is developed with security research in mind.
-
-**Only run the scanner on infrastructure you own or have explicit authorization to test.**
-
-See `SECURITY.md` for vulnerability reporting.
+    prometheus-atlas/
+    │
+    ├── apps/
+    │   └── scanner/          # CLI principal (atlas)
+    │
+    ├── crates/
+    │   ├── atlas-core
+    │   ├── atlas-discovery
+    │   ├── atlas-snapshot
+    │   ├── atlas-diff
+    │   └── atlas-output
+    │
+    ├── docs/
+    │   ├── architecture.md
+    │   ├── roadmap.md
+    │   └── vision.md
+    │
+    ├── infra/
+    ├── examples/
+    └── tests/
 
 ---
 
-# Contributing
+# Atlas CLI (Planeado)
 
-Contributions, discussions, and research ideas are welcome.
+El primer componente del proyecto será **Prometheus Atlas Scanner**, una herramienta de línea de comandos.
 
-See:
+Ejemplo de uso:
 
+    atlas scan ejemplo.com
+    atlas snapshot guardar
+    atlas diff snapshot_viejo.json snapshot_nuevo.json
 
-CONTRIBUTING.md
+Esta herramienta permitirá:
 
+- descubrir activos de infraestructura
+- generar snapshots de infraestructura
+- detectar cambios entre snapshots
+- identificar posibles derivas de seguridad
 
 ---
 
-# License
+# Stack Tecnológico
+
+Prometheus Atlas utiliza tecnologías modernas:
+
+| Capa | Tecnología |
+|------|------------|
+| Motor de descubrimiento | Rust |
+| Análisis de deriva | Python |
+| Procesamiento de datos | Rust + Python |
+| Modelado de infraestructura | Bases de datos de grafos |
+| Almacenamiento de eventos | ClickHouse |
+| Mensajería | NATS |
+| Interfaz web | Next.js |
+
+---
+
+# Estado del Proyecto
+
+Proyecto en etapa temprana de desarrollo.
+
+El enfoque inicial es construir el **scanner MVP** con:
+
+- descubrimiento pasivo
+- snapshots de infraestructura
+- detección de cambios
+- exportación JSON
+
+---
+
+# Aviso de Seguridad
+
+Esta herramienta está destinada únicamente para:
+
+- investigación en ciberseguridad
+- auditorías autorizadas
+
+Solo debes escanear sistemas:
+
+- que te pertenezcan
+- o para los que tengas permiso explícito
+
+El uso indebido puede violar leyes o políticas de seguridad.
+
+---
+
+# Contribuciones
+
+Se aceptan contribuciones de:
+
+- investigadores de seguridad
+- desarrolladores Rust
+- ingenieros DevSecOps
+
+Consulta el archivo:
+
+**CONTRIBUTING.md**
+
+---
+
+# Licencia
 
 Apache License 2.0
 
 ---
 
-# Author
+# Autor
 
-Andres  
-Cybersecurity Research & Engineering
+Claudio Andres Sanjines Cuellar  
+Investigación y Desarrollo en Ciberseguridad
 
 ---
 
-# Vision
+# Visión
 
-Prometheus Atlas aims to become the **source of truth for infrastructure change and security drift in cloud-native environments.**
+Prometheus Atlas busca convertirse en la **fuente de verdad sobre cambios en infraestructura y deriva de seguridad en entornos cloud-native**.

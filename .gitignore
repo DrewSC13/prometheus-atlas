@@ -1,0 +1,166 @@
+# =========================================================
+# Prometheus Atlas .gitignore
+# Rust Monorepo
+# =========================================================
+
+########################################
+# Rust
+########################################
+
+# Carpeta de compilación
+/target/
+
+# Archivos temporales de Rust
+**/*.rs.bk
+
+########################################
+# Logs
+########################################
+
+*.log
+logs/
+*.out
+*.err
+
+
+########################################
+# Archivos temporales
+########################################
+
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+.cache/
+
+
+########################################
+# Sistema operativo
+########################################
+
+# macOS
+.DS_Store
+
+# Linux
+.Trash-*
+.nfs*
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+
+########################################
+# Editores / IDE
+########################################
+
+# VSCode
+.vscode/
+
+# JetBrains
+.idea/
+*.iml
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+########################################
+# Python (si usas módulos auxiliares)
+########################################
+
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+build/
+dist/
+
+########################################
+# Node / Frontend futuro
+########################################
+
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+
+########################################
+# Archivos de entorno
+########################################
+
+.env
+.env.*
+*.env
+
+########################################
+# Archivos de configuración local
+########################################
+
+*.local
+config.local.yaml
+config.local.json
+
+########################################
+# Claves y secretos
+########################################
+
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr
+
+secrets/
+keys/
+
+########################################
+# Datos generados
+########################################
+
+data/
+datasets/
+snapshots/
+
+########################################
+# Archivos de pruebas temporales
+########################################
+
+coverage/
+*.prof
+
+########################################
+# Terraform / Infraestructura
+########################################
+
+.terraform/
+*.tfstate
+*.tfstate.backup
+terraform.tfvars
+
+########################################
+# Docker
+########################################
+
+docker-compose.override.yml
+
+########################################
+# Archivos generados por el scanner
+########################################
+
+atlas-output/
+atlas-cache/
+scan-results/
+
+########################################
+# GPG / SSH backups (por seguridad)
+########################################
+
+*.asc
+gpg-backup*
+ssh-backup*
