@@ -1,0 +1,34 @@
+name: Bug report
+description: Reportar un error
+title: "[BUG] "
+labels: ["bug"]
+
+body:
+
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por reportar un error.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Descripción
+      description: Explica el problema
+      placeholder: Describe el error
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Pasos para reproducir
+      description: Cómo reproducir el error
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Entorno
+      description: OS, versión de Rust, etc.
