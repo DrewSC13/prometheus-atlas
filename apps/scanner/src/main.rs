@@ -211,6 +211,17 @@ fn print_human_drift_report(report: &atlas_drift::DriftReport) {
     println!();
     println!("Score total: {}", report.summary.total_score);
     println!("Severidad global: {}", report.summary.overall_severity);
+    println!(
+        "Hallazgos sobre activos críticos: {}",
+        report.summary.critical_findings
+    );
+
+    println!();
+    println!("Distribución por tipo de activo:");
+    println!("  - IPs: {}", report.summary.asset_types.ips);
+    println!("  - Subdominios: {}", report.summary.asset_types.subdomains);
+    println!("  - Servicios: {}", report.summary.asset_types.services);
+    println!("  - Unknown: {}", report.summary.asset_types.unknown);
 
     if !report.suppressed_findings.is_empty() {
         println!();
@@ -230,19 +241,26 @@ fn print_human_drift_report(report: &atlas_drift::DriftReport) {
     println!("Hallazgos agrupados por recurso:");
     for group in &report.groups {
         println!(
-            "  - recurso={} | severidad={} | score={}",
-            group.resource, group.highest_severity, group.total_score
+            "  - recurso={} | severidad={} | criticidad={} | score={}",
+            group.resource, group.highest_severity, group.highest_criticality, group.total_score
         );
 
         for finding in &group.findings {
             println!(
-                "      [{}] {} | categoría={} | entorno={} | score={}",
+                "      [{}] {} | categoría={} | tipo={} | entorno={} | criticidad={} | score={}",
                 finding.severity,
                 finding.title,
                 finding.category,
+                finding.asset_type,
                 finding.environment,
+                finding.criticality,
                 finding.score
             );
+
+            if !finding.tags.is_empty() {
+                println!("          tags: {}", finding.tags.join(", "));
+            }
+
             println!("          {}", finding.description);
         }
     }
@@ -268,6 +286,20 @@ fn print_human_timeline_report(report: &atlas_drift::TimelineReport) {
         "  - Recursos únicos afectados: {}",
         report.executive.unique_resources
     );
+    println!(
+        "  - Hallazgos sobre activos críticos: {}",
+        report.executive.critical_findings
+    );
+
+    println!();
+    println!("Distribución histórica por tipo de activo:");
+    println!("  - IPs: {}", report.executive.asset_types.ips);
+    println!(
+        "  - Subdominios: {}",
+        report.executive.asset_types.subdomains
+    );
+    println!("  - Servicios: {}", report.executive.asset_types.services);
+    println!("  - Unknown: {}", report.executive.asset_types.unknown);
 
     if !report.executive.top_resources.is_empty() {
         println!();
