@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+
+members = [
+    "apps/scanner",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Claudio Andres Sanjines Cuellar"]
+repository = "https://github.com/DrewSC13/prometheus-atlas"
