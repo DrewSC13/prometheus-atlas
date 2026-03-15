@@ -1,4 +1,4 @@
-use atlas_core::HttpService;
+use atlas_core::{HttpService, SecurityHeaders};
 use atlas_snapshot::Snapshot;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,12 @@ pub struct ServiceChange {
     pub after_status: u16,
     pub before_server: Option<String>,
     pub after_server: Option<String>,
+    pub before_provider: Option<String>,
+    pub after_provider: Option<String>,
+    pub before_technologies: Vec<String>,
+    pub after_technologies: Vec<String>,
+    pub before_security_headers: SecurityHeaders,
+    pub after_security_headers: SecurityHeaders,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,13 +33,10 @@ pub struct DiffReport {
     pub target: String,
     pub older_timestamp: DateTime<Utc>,
     pub newer_timestamp: DateTime<Utc>,
-
     pub new_ips: Vec<String>,
     pub removed_ips: Vec<String>,
-
     pub new_subdomains: Vec<String>,
     pub removed_subdomains: Vec<String>,
-
     pub new_services: Vec<HttpService>,
     pub removed_services: Vec<HttpService>,
     pub changed_services: Vec<ServiceChange>,
@@ -75,9 +78,7 @@ pub fn diff_snapshots(older: &Snapshot, newer: &Snapshot) -> DiffReport {
         match old_services.get(key) {
             None => added_services.push(new_service.clone()),
             Some(old_service) => {
-                if old_service.status != new_service.status
-                    || old_service.server != new_service.server
-                {
+                if service_changed(old_service, new_service) {
                     changed_services.push(ServiceChange {
                         host: new_service.host.clone(),
                         url: new_service.url.clone(),
@@ -86,6 +87,12 @@ pub fn diff_snapshots(older: &Snapshot, newer: &Snapshot) -> DiffReport {
                         after_status: new_service.status,
                         before_server: old_service.server.clone(),
                         after_server: new_service.server.clone(),
+                        before_provider: old_service.provider.clone(),
+                        after_provider: new_service.provider.clone(),
+                        before_technologies: old_service.technologies.clone(),
+                        after_technologies: new_service.technologies.clone(),
+                        before_security_headers: old_service.security_headers.clone(),
+                        after_security_headers: new_service.security_headers.clone(),
                     });
                 }
             }
@@ -116,6 +123,23 @@ pub fn diff_snapshots(older: &Snapshot, newer: &Snapshot) -> DiffReport {
     }
 }
 
+fn service_changed(old_service: &HttpService, new_service: &HttpService) -> bool {
+    old_service.status != new_service.status
+        || old_service.server != new_service.server
+        || old_service.provider != new_service.provider
+        || old_service.technologies != new_service.technologies
+        || old_service.security_headers.strict_transport_security
+            != new_service.security_headers.strict_transport_security
+        || old_service.security_headers.content_security_policy
+            != new_service.security_headers.content_security_policy
+        || old_service.security_headers.x_frame_options
+            != new_service.security_headers.x_frame_options
+        || old_service.security_headers.x_content_type_options
+            != new_service.security_headers.x_content_type_options
+        || old_service.security_headers.referrer_policy
+            != new_service.security_headers.referrer_policy
+}
+
 fn service_map(services: &[HttpService]) -> BTreeMap<ServiceKey, HttpService> {
     services
         .iter()
@@ -142,6 +166,16 @@ mod tests {
     use atlas_core::{HttpService, ScanResult};
     use chrono::Utc;
 
+    fn headers() -> SecurityHeaders {
+        SecurityHeaders {
+            strict_transport_security: false,
+            content_security_policy: false,
+            x_frame_options: false,
+            x_content_type_options: false,
+            referrer_policy: false,
+        }
+    }
+
     fn service(
         host: &str,
         url: &str,
@@ -155,6 +189,12 @@ mod tests {
             scheme: scheme.to_string(),
             status,
             server: server.map(ToString::to_string),
+            title: None,
+            content_type: None,
+            technologies: Vec::new(),
+            provider: None,
+            tls_enabled: scheme == "https",
+            security_headers: headers(),
         }
     }
 
@@ -229,18 +269,17 @@ mod tests {
             )],
         );
 
-        let new = snapshot(
+        let mut changed = service(
             "example.com",
-            vec![],
-            vec![],
-            vec![service(
-                "example.com",
-                "https://example.com",
-                "https",
-                503,
-                Some("cloudflare"),
-            )],
+            "https://example.com",
+            "https",
+            503,
+            Some("cloudflare"),
         );
+        changed.provider = Some("Cloudflare".to_string());
+        changed.technologies = vec!["cloudflare".to_string()];
+
+        let new = snapshot("example.com", vec![], vec![], vec![changed]);
 
         let report = diff_snapshots(&old, &new);
 

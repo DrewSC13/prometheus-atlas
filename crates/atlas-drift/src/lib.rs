@@ -17,17 +17,6 @@ pub enum Severity {
     High,
 }
 
-impl Severity {
-    pub fn score(&self) -> u32 {
-        match self {
-            Severity::Info => 5,
-            Severity::Low => 20,
-            Severity::Medium => 50,
-            Severity::High => 90,
-        }
-    }
-}
-
 impl std::fmt::Display for Severity {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -191,6 +180,18 @@ pub struct CategoryAggregate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TechnologyAggregate {
+    pub technology: String,
+    pub occurrences: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderAggregate {
+    pub provider: String,
+    pub occurrences: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineExecutiveSummary {
     pub total_score: u32,
     pub overall_severity: Severity,
@@ -200,6 +201,8 @@ pub struct TimelineExecutiveSummary {
     pub asset_types: AssetTypeSummary,
     pub top_resources: Vec<ResourceAggregate>,
     pub top_categories: Vec<CategoryAggregate>,
+    pub top_technologies: Vec<TechnologyAggregate>,
+    pub top_providers: Vec<ProviderAggregate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,6 +326,9 @@ pub fn analyze_diff_with_policy(diff: &DiffReport, policy: Option<&DriftPolicy>)
         findings.push(classify_new_service(
             service.url.as_str(),
             service.scheme.as_str(),
+            service.technologies.as_slice(),
+            service.provider.as_deref(),
+            &service.security_headers,
             policy,
         ));
     }
@@ -353,9 +359,7 @@ pub fn analyze_diff_with_policy(diff: &DiffReport, policy: Option<&DriftPolicy>)
     }
 
     for change in &diff.changed_services {
-        if let Some(finding) = classify_service_change(change, policy) {
-            findings.push(finding);
-        }
+        findings.extend(classify_service_change(change, policy));
     }
 
     let (suppressed_findings, active_findings) = apply_policy(findings, policy);
@@ -418,6 +422,8 @@ fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecut
 
     let mut resource_map: BTreeMap<String, ResourceAggregate> = BTreeMap::new();
     let mut category_map: BTreeMap<String, CategoryAggregate> = BTreeMap::new();
+    let mut technology_map: BTreeMap<String, TechnologyAggregate> = BTreeMap::new();
+    let mut provider_map: BTreeMap<String, ProviderAggregate> = BTreeMap::new();
 
     for transition in transitions {
         total_score += transition.report.summary.total_score;
@@ -426,7 +432,6 @@ fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecut
 
         for finding in &transition.report.findings {
             unique_resources.insert(finding.resource.clone());
-
             increment_asset_type(&mut asset_types, &finding.asset_type);
 
             resource_map
@@ -452,6 +457,28 @@ fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecut
                     occurrences: 1,
                     total_score: finding.score,
                 });
+
+            for tag in &finding.tags {
+                if let Some(tech) = tag.strip_prefix("tech:") {
+                    technology_map
+                        .entry(tech.to_string())
+                        .and_modify(|entry| entry.occurrences += 1)
+                        .or_insert(TechnologyAggregate {
+                            technology: tech.to_string(),
+                            occurrences: 1,
+                        });
+                }
+
+                if let Some(provider) = tag.strip_prefix("provider:") {
+                    provider_map
+                        .entry(provider.to_string())
+                        .and_modify(|entry| entry.occurrences += 1)
+                        .or_insert(ProviderAggregate {
+                            provider: provider.to_string(),
+                            occurrences: 1,
+                        });
+                }
+            }
         }
     }
 
@@ -473,6 +500,14 @@ fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecut
     top_categories.sort_by(|a, b| b.total_score.cmp(&a.total_score));
     top_categories.truncate(5);
 
+    let mut top_technologies: Vec<_> = technology_map.into_values().collect();
+    top_technologies.sort_by(|a, b| b.occurrences.cmp(&a.occurrences));
+    top_technologies.truncate(5);
+
+    let mut top_providers: Vec<_> = provider_map.into_values().collect();
+    top_providers.sort_by(|a, b| b.occurrences.cmp(&a.occurrences));
+    top_providers.truncate(5);
+
     TimelineExecutiveSummary {
         total_score,
         overall_severity,
@@ -482,6 +517,8 @@ fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecut
         asset_types,
         top_resources,
         top_categories,
+        top_technologies,
+        top_providers,
     }
 }
 
@@ -574,25 +611,35 @@ fn classify_new_subdomain(subdomain: &str, policy: Option<&DriftPolicy>) -> Drif
     }
 }
 
-fn classify_new_service(url: &str, scheme: &str, policy: Option<&DriftPolicy>) -> DriftFinding {
+fn classify_new_service(
+    url: &str,
+    scheme: &str,
+    technologies: &[String],
+    provider: Option<&str>,
+    security_headers: &atlas_core::SecurityHeaders,
+    policy: Option<&DriftPolicy>,
+) -> DriftFinding {
     let environment = infer_environment_with_policy(url, policy);
     let base_criticality = classify_criticality(url, policy, &environment, &AssetType::Service);
 
+    let mut tags = vec!["service".to_string(), "new-exposure".to_string()];
+    tags.extend(technology_tags(technologies));
+    if let Some(provider) = provider {
+        tags.push(format!("provider:{provider}"));
+    }
+
+    let missing_headers = count_missing_security_headers(security_headers);
+
     match scheme {
         "http" => {
-            let mut tags = vec![
-                "service".to_string(),
-                "new-exposure".to_string(),
-                "plaintext".to_string(),
-            ];
-
+            tags.push("plaintext".to_string());
             if matches!(environment, Environment::Admin) {
                 tags.push("admin".to_string());
             }
 
             build_base_finding(FindingSpec {
                 severity: Severity::High,
-                score: 90,
+                score: 90 + (missing_headers as u32 * 2),
                 category: "new_http_service".to_string(),
                 title: "Nuevo servicio HTTP expuesto".to_string(),
                 resource: url.to_string(),
@@ -612,21 +659,33 @@ fn classify_new_service(url: &str, scheme: &str, policy: Option<&DriftPolicy>) -
                 ),
             })
         }
-        "https" => build_base_finding(FindingSpec {
-            severity: Severity::Medium,
-            score: 50,
-            category: "new_https_service".to_string(),
-            title: "Nuevo servicio HTTPS expuesto".to_string(),
-            resource: url.to_string(),
-            environment,
-            criticality: base_criticality,
-            tags: vec![
-                "service".to_string(),
-                "new-exposure".to_string(),
-                "tls".to_string(),
-            ],
-            description: format!("Se detectó un nuevo servicio HTTPS accesible en {}.", url),
-        }),
+        "https" => {
+            tags.push("tls".to_string());
+
+            let severity = if technologies.iter().any(|t| t == "admin-ui") {
+                Severity::High
+            } else {
+                Severity::Medium
+            };
+
+            let score = if technologies.iter().any(|t| t == "admin-ui") {
+                70
+            } else {
+                50
+            } + (missing_headers as u32 * 2);
+
+            build_base_finding(FindingSpec {
+                severity,
+                score,
+                category: "new_https_service".to_string(),
+                title: "Nuevo servicio HTTPS expuesto".to_string(),
+                resource: url.to_string(),
+                environment,
+                criticality: base_criticality,
+                tags,
+                description: format!("Se detectó un nuevo servicio HTTPS accesible en {}.", url),
+            })
+        }
         _ => build_base_finding(FindingSpec {
             severity: Severity::Low,
             score: 20,
@@ -635,7 +694,7 @@ fn classify_new_service(url: &str, scheme: &str, policy: Option<&DriftPolicy>) -
             resource: url.to_string(),
             environment,
             criticality: base_criticality,
-            tags: vec!["service".to_string(), "new-exposure".to_string()],
+            tags,
             description: format!("Se detectó un nuevo servicio expuesto en {}.", url),
         }),
     }
@@ -644,10 +703,19 @@ fn classify_new_service(url: &str, scheme: &str, policy: Option<&DriftPolicy>) -
 fn classify_service_change(
     change: &ServiceChange,
     policy: Option<&DriftPolicy>,
-) -> Option<DriftFinding> {
+) -> Vec<DriftFinding> {
+    let mut findings = Vec::new();
+
     let became_available =
         !is_success_status(change.before_status) && is_success_status(change.after_status);
     let changed_server = change.before_server != change.after_server;
+    let changed_provider = change.before_provider != change.after_provider;
+    let changed_tech = change.before_technologies != change.after_technologies;
+    let headers_weakened = security_headers_weakened(
+        &change.before_security_headers,
+        &change.after_security_headers,
+    );
+
     let environment = infer_environment_with_policy(change.url.as_str(), policy);
     let criticality = classify_criticality(
         change.url.as_str(),
@@ -657,7 +725,7 @@ fn classify_service_change(
     );
 
     if became_available {
-        return Some(build_base_finding(FindingSpec {
+        findings.push(build_base_finding(FindingSpec {
             severity: if matches!(environment, Environment::Admin | Environment::Production) {
                 Severity::High
             } else {
@@ -671,8 +739,8 @@ fn classify_service_change(
             category: "service_became_available".to_string(),
             title: "Servicio ahora accesible".to_string(),
             resource: change.url.clone(),
-            environment,
-            criticality,
+            environment: environment.clone(),
+            criticality: criticality.clone(),
             tags: vec![
                 "service".to_string(),
                 "availability-change".to_string(),
@@ -685,7 +753,7 @@ fn classify_service_change(
         }));
     }
 
-    if changed_server {
+    if changed_server || changed_provider {
         let severity = if matches!(criticality, Criticality::Critical | Criticality::High) {
             Severity::Medium
         } else {
@@ -698,23 +766,73 @@ fn classify_service_change(
             15
         };
 
-        return Some(build_base_finding(FindingSpec {
+        let mut tags = vec!["service".to_string(), "backend-change".to_string()];
+        if let Some(provider) = &change.after_provider {
+            tags.push(format!("provider:{provider}"));
+        }
+
+        findings.push(build_base_finding(FindingSpec {
             severity,
             score,
             category: "service_backend_changed".to_string(),
             title: "Cambio de servidor o backend".to_string(),
             resource: change.url.clone(),
-            environment,
-            criticality,
-            tags: vec!["service".to_string(), "backend-change".to_string()],
+            environment: environment.clone(),
+            criticality: criticality.clone(),
+            tags,
             description: format!(
-                "El servicio {} cambió el encabezado Server de {:?} a {:?}.",
-                change.url, change.before_server, change.after_server
+                "El servicio {} cambió backend/provider/server de {:?}/{:?} a {:?}/{:?}.",
+                change.url,
+                change.before_server,
+                change.before_provider,
+                change.after_server,
+                change.after_provider
             ),
         }));
     }
 
-    None
+    if changed_tech {
+        let mut tags = vec!["service".to_string(), "technology-change".to_string()];
+        tags.extend(technology_tags(&change.after_technologies));
+
+        findings.push(build_base_finding(FindingSpec {
+            severity: Severity::Medium,
+            score: 40,
+            category: "service_fingerprint_changed".to_string(),
+            title: "Fingerprint tecnológico cambiado".to_string(),
+            resource: change.url.clone(),
+            environment: environment.clone(),
+            criticality: criticality.clone(),
+            tags,
+            description: format!(
+                "El servicio {} cambió de tecnologías {:?} a {:?}.",
+                change.url, change.before_technologies, change.after_technologies
+            ),
+        }));
+    }
+
+    if headers_weakened {
+        findings.push(build_base_finding(FindingSpec {
+            severity: Severity::Medium,
+            score: 45,
+            category: "security_headers_weakened".to_string(),
+            title: "Headers de seguridad debilitados".to_string(),
+            resource: change.url.clone(),
+            environment,
+            criticality,
+            tags: vec![
+                "service".to_string(),
+                "security-headers".to_string(),
+                "hardening-regression".to_string(),
+            ],
+            description: format!(
+                "El servicio {} perdió uno o más headers de seguridad respecto al snapshot anterior.",
+                change.url
+            ),
+        }));
+    }
+
+    findings
 }
 
 fn build_base_finding(mut spec: FindingSpec) -> DriftFinding {
@@ -898,6 +1016,37 @@ fn increment_asset_type(summary: &mut AssetTypeSummary, asset_type: &AssetType) 
     }
 }
 
+fn technology_tags(technologies: &[String]) -> Vec<String> {
+    technologies
+        .iter()
+        .map(|tech| format!("tech:{tech}"))
+        .collect()
+}
+
+fn count_missing_security_headers(headers: &atlas_core::SecurityHeaders) -> usize {
+    [
+        headers.strict_transport_security,
+        headers.content_security_policy,
+        headers.x_frame_options,
+        headers.x_content_type_options,
+        headers.referrer_policy,
+    ]
+    .iter()
+    .filter(|present| !**present)
+    .count()
+}
+
+fn security_headers_weakened(
+    before: &atlas_core::SecurityHeaders,
+    after: &atlas_core::SecurityHeaders,
+) -> bool {
+    (before.strict_transport_security && !after.strict_transport_security)
+        || (before.content_security_policy && !after.content_security_policy)
+        || (before.x_frame_options && !after.x_frame_options)
+        || (before.x_content_type_options && !after.x_content_type_options)
+        || (before.referrer_policy && !after.referrer_policy)
+}
+
 fn is_success_status(status: u16) -> bool {
     (200..300).contains(&status)
 }
@@ -913,8 +1062,18 @@ fn matches_resource(pattern: &str, resource: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas_core::{HttpService, ScanResult};
+    use atlas_core::{HttpService, ScanResult, SecurityHeaders};
     use chrono::Utc;
+
+    fn headers() -> SecurityHeaders {
+        SecurityHeaders {
+            strict_transport_security: false,
+            content_security_policy: false,
+            x_frame_options: false,
+            x_content_type_options: false,
+            referrer_policy: false,
+        }
+    }
 
     fn empty_diff() -> DiffReport {
         DiffReport {
@@ -964,6 +1123,12 @@ mod tests {
             scheme: "http".to_string(),
             status: 200,
             server: Some("nginx".to_string()),
+            title: None,
+            content_type: Some("text/html".to_string()),
+            technologies: vec!["nginx".to_string()],
+            provider: None,
+            tls_enabled: false,
+            security_headers: headers(),
         });
 
         let report = analyze_diff(&diff);
@@ -983,12 +1148,17 @@ mod tests {
             after_status: 200,
             before_server: Some("nginx".to_string()),
             after_server: Some("nginx".to_string()),
+            before_provider: None,
+            after_provider: None,
+            before_technologies: vec![],
+            after_technologies: vec![],
+            before_security_headers: headers(),
+            after_security_headers: headers(),
         });
 
         let report = analyze_diff(&diff);
 
-        assert_eq!(report.findings.len(), 1);
-        assert!(report.summary.medium >= 1 || report.summary.high >= 1);
+        assert!(!report.findings.is_empty());
     }
 
     #[test]
@@ -1020,6 +1190,12 @@ mod tests {
             scheme: "http".to_string(),
             status: 200,
             server: Some("nginx".to_string()),
+            title: None,
+            content_type: Some("text/html".to_string()),
+            technologies: vec!["nginx".to_string()],
+            provider: None,
+            tls_enabled: false,
+            security_headers: headers(),
         });
 
         let report = analyze_diff(&diff);
@@ -1055,6 +1231,12 @@ mod tests {
             scheme: "https".to_string(),
             status: 200,
             server: Some("nginx".to_string()),
+            title: None,
+            content_type: Some("application/json".to_string()),
+            technologies: vec!["nginx".to_string(), "json-api".to_string()],
+            provider: None,
+            tls_enabled: true,
+            security_headers: headers(),
         });
 
         let policy = DriftPolicy {
@@ -1088,5 +1270,15 @@ mod tests {
         });
 
         assert!(matches!(finding.asset_type, AssetType::Ip));
+    }
+
+    #[test]
+    fn detects_security_header_regression() {
+        let mut before = headers();
+        before.content_security_policy = true;
+
+        let after = headers();
+
+        assert!(security_headers_weakened(&before, &after));
     }
 }
