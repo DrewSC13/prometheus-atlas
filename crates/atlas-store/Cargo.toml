@@ -1,5 +1,5 @@
 [package]
-name = "atlas-drift"
+name = "atlas-store"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -9,11 +9,9 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
-hex.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 
-atlas-core = { path = "../atlas-core" }
-atlas-diff = { path = "../atlas-diff" }
+atlas-drift = { path = "../atlas-drift" }
 atlas-snapshot = { path = "../atlas-snapshot" }

@@ -164,7 +164,6 @@ fn difference(left: &BTreeSet<String>, right: &BTreeSet<String>) -> Vec<String> 
 mod tests {
     use super::*;
     use atlas_core::{HttpService, ScanResult};
-    use chrono::Utc;
 
     fn headers() -> SecurityHeaders {
         SecurityHeaders {
@@ -205,6 +204,7 @@ mod tests {
         services: Vec<HttpService>,
     ) -> Snapshot {
         Snapshot {
+            snapshot_version: 2,
             timestamp: Utc::now(),
             target: target.to_string(),
             scan: ScanResult {

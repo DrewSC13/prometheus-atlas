@@ -1,0 +1,24 @@
+[logging]
+level = "info"
+json = false
+
+[storage]
+backend = "sqlite"
+path = ".atlas/atlas.db"
+
+[scanner]
+timeout_seconds = 5
+follow_redirects = true
+
+[drift]
+profile = "standard"
+persist_by_default = true
+
+[output]
+default_format = "human"
+
+[telemetry]
+enabled = true
+
+[plugins]
+enabled = ["criticality-tag", "state-tag", "normalize-tags"]

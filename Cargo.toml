@@ -2,28 +2,39 @@
 resolver = "2"
 members = [
     "apps/scanner",
+    "crates/atlas-config",
     "crates/atlas-core",
-    "crates/atlas-dns",
-    "crates/atlas-http",
-    "crates/atlas-discovery",
-    "crates/atlas-snapshot",
-    "crates/atlas-output",
     "crates/atlas-diff",
+    "crates/atlas-discovery",
+    "crates/atlas-dns",
     "crates/atlas-drift",
+    "crates/atlas-http",
+    "crates/atlas-output",
+    "crates/atlas-plugins",
+    "crates/atlas-snapshot",
+    "crates/atlas-store"
 ]
 
 [workspace.package]
 edition = "2021"
-license = "Apache-2.0"
+license = "MIT"
 authors = ["Claudio Andres Sanjines Cuellar"]
 repository = "https://github.com/DrewSC13/prometheus-atlas"
 
 [workspace.dependencies]
-anyhow = "1"
-clap = { version = "4", features = ["derive"] }
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
 futures = "0.3"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tokio = { version = "1", features = ["full"] }
+hex = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-chrono = { version = "0.4", features = ["clock", "serde"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+tempfile = "3.13"
+tokio = { version = "1.43", features = ["full"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "json"] }
+walkdir = "2.5"

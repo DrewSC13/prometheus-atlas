@@ -1,6 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use atlas_config::AppConfig;
+use atlas_plugins::default_registry_for;
+use atlas_store::{AtlasStore, ExportFormat};
 use clap::{Parser, Subcommand};
-use std::path::PathBuf;
+use serde_json::json;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::time::Instant;
+use tracing::{info, warn};
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Parser, Debug)]
 #[command(name = "atlas")]
@@ -8,10 +16,18 @@ use std::path::PathBuf;
 struct Cli {
     #[command(subcommand)]
     command: Commands,
+
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    Init {
+        #[arg(long, default_value = "atlas.toml")]
+        output: PathBuf,
+    },
+
     Scan {
         target: String,
 
@@ -27,6 +43,9 @@ enum Commands {
 
         #[arg(long, default_value = ".snapshots")]
         dir: PathBuf,
+
+        #[arg(long)]
+        persist: bool,
     },
 
     Diff {
@@ -46,6 +65,9 @@ enum Commands {
 
         #[arg(long)]
         policy: Option<PathBuf>,
+
+        #[arg(long)]
+        persist: bool,
 
         #[arg(long)]
         json: bool,
@@ -69,46 +91,167 @@ enum Commands {
         #[arg(long)]
         output: Option<PathBuf>,
     },
+
+    History {
+        target: String,
+    },
+
+    Findings {
+        target: String,
+
+        #[arg(long)]
+        severity: Option<String>,
+
+        #[arg(long)]
+        state: Option<String>,
+    },
+
+    Snapshots {
+        target: String,
+    },
+
+    Export {
+        target: String,
+
+        #[arg(long)]
+        format: String,
+
+        #[arg(long)]
+        output: PathBuf,
+
+        #[arg(long)]
+        severity: Option<String>,
+
+        #[arg(long)]
+        state: Option<String>,
+    },
+
+    Migrate {
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+    },
+
+    Telemetry {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    let config = if let Some(path) = cli.config.as_deref() {
+        AppConfig::load_from_path(path)?
+    } else {
+        AppConfig::load_from_default_locations()?
+    };
+
+    config.validate()?;
+    init_tracing(&config)?;
+    info!("Prometheus Atlas starting");
+
     match cli.command {
+        Commands::Init { output } => {
+            let started = Instant::now();
+
+            if output.exists() {
+                warn!(
+                    "El archivo de configuración ya existe: {}",
+                    output.display()
+                );
+            } else {
+                AppConfig::write_default_to_path(&output)?;
+                println!("Configuración creada en: {}", output.display());
+            }
+
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            println!("Storage inicializado en: {}", config.storage.path);
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "init",
+                None,
+                started.elapsed().as_millis(),
+                json!({"config_path": output.display().to_string()}),
+            )?;
+        }
+
         Commands::Scan {
             target,
-            json,
+            json: want_json,
             output,
         } => {
+            let started = Instant::now();
             let result = atlas_discovery::scan_target(&target).await?;
 
-            if json {
+            if want_json {
                 atlas_output::write_json_output(&result, output.as_deref())?;
             } else {
                 atlas_output::print_human_scan_result(&result);
             }
+
+            let store = AtlasStore::open(Path::new(&config.storage.path)).ok();
+            record_telemetry_if_enabled(
+                &config,
+                store.as_ref(),
+                "scan",
+                Some(&target),
+                started.elapsed().as_millis(),
+                json!({
+                    "resolved_ips": result.resolved_ips.len(),
+                    "subdomains": result.subdomains.len(),
+                    "services": result.services.len()
+                }),
+            )?;
         }
 
-        Commands::Snapshot { target, dir } => {
+        Commands::Snapshot {
+            target,
+            dir,
+            persist,
+        } => {
+            let started = Instant::now();
             let result = atlas_discovery::scan_target(&target).await?;
             let snapshot = atlas_snapshot::Snapshot::new(result);
             let path = atlas_snapshot::save_snapshot(&snapshot, &dir)?;
-
             println!("Snapshot guardado en: {}", path.display());
+
+            let should_persist = persist || config.drift.persist_by_default;
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+
+            if should_persist {
+                store.initialize()?;
+                store.register_snapshot(&path, &snapshot)?;
+                println!("Snapshot registrado en storage.");
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "snapshot",
+                Some(&target),
+                started.elapsed().as_millis(),
+                json!({
+                    "path": path.display().to_string(),
+                    "persisted": should_persist
+                }),
+            )?;
         }
 
         Commands::Diff {
             older,
             newer,
-            json,
+            json: want_json,
             output,
         } => {
             let older_snapshot = atlas_snapshot::load_snapshot(&older)?;
             let newer_snapshot = atlas_snapshot::load_snapshot(&newer)?;
             let report = atlas_diff::diff_snapshots(&older_snapshot, &newer_snapshot);
 
-            if json {
+            if want_json {
                 atlas_output::write_json_output(&report, output.as_deref())?;
             } else {
                 print_human_diff_report(&report);
@@ -119,49 +262,257 @@ async fn main() -> Result<()> {
             older,
             newer,
             policy,
-            json,
+            persist,
+            json: want_json,
             output,
         } => {
+            let started = Instant::now();
             let older_snapshot = atlas_snapshot::load_snapshot(&older)?;
             let newer_snapshot = atlas_snapshot::load_snapshot(&newer)?;
             let diff = atlas_diff::diff_snapshots(&older_snapshot, &newer_snapshot);
 
-            let policy = match policy {
-                Some(path) => Some(atlas_drift::DriftPolicy::load_from_path(&path)?),
+            let policy_loaded = match policy.as_deref() {
+                Some(path) => Some(atlas_drift::DriftPolicy::load_from_path(path)?),
                 None => None,
             };
 
-            let drift = atlas_drift::analyze_diff_with_policy(&diff, policy.as_ref());
+            let mut drift = atlas_drift::analyze_diff_with_policy(&diff, policy_loaded.as_ref());
 
-            if json {
+            let registry = default_registry_for(&config.plugins.enabled);
+            registry.apply_drift_report(&mut drift);
+
+            if want_json {
                 atlas_output::write_json_output(&drift, output.as_deref())?;
             } else {
                 print_human_drift_report(&drift);
             }
+
+            let should_persist = persist || config.drift.persist_by_default;
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+
+            if should_persist {
+                store.initialize()?;
+                store.register_drift_report(
+                    &diff.target,
+                    &older,
+                    &newer,
+                    policy.as_deref(),
+                    &drift,
+                )?;
+                println!("Drift registrado en storage.");
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "drift",
+                Some(&diff.target),
+                started.elapsed().as_millis(),
+                json!({
+                    "findings": drift.findings.len(),
+                    "suppressed": drift.suppressed_findings.len(),
+                    "score": drift.summary.total_score,
+                    "persisted": should_persist
+                }),
+            )?;
         }
 
         Commands::Timeline {
             target,
             dir,
             policy,
-            json,
+            json: want_json,
             output,
         } => {
+            let started = Instant::now();
             let snapshots = atlas_snapshot::load_all_snapshots_for_target(&dir, &target)?;
 
-            let policy = match policy {
-                Some(path) => Some(atlas_drift::DriftPolicy::load_from_path(&path)?),
+            let policy_loaded = match policy.as_deref() {
+                Some(path) => Some(atlas_drift::DriftPolicy::load_from_path(path)?),
                 None => None,
             };
 
-            let timeline =
-                atlas_drift::build_timeline_report(&target, &snapshots, policy.as_ref())?;
+            let mut timeline =
+                atlas_drift::build_timeline_report(&target, &snapshots, policy_loaded.as_ref())?;
 
-            if json {
+            let registry = default_registry_for(&config.plugins.enabled);
+            registry.apply_timeline_report(&mut timeline);
+
+            if want_json {
                 atlas_output::write_json_output(&timeline, output.as_deref())?;
             } else {
                 print_human_timeline_report(&timeline);
             }
+
+            let store = AtlasStore::open(Path::new(&config.storage.path)).ok();
+            record_telemetry_if_enabled(
+                &config,
+                store.as_ref(),
+                "timeline",
+                Some(&target),
+                started.elapsed().as_millis(),
+                json!({
+                    "snapshots": timeline.snapshot_count,
+                    "transitions": timeline.transition_count,
+                    "total_findings": timeline.executive.total_findings,
+                    "total_score": timeline.executive.total_score
+                }),
+            )?;
+        }
+
+        Commands::History { target } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let history = store.list_history(&target)?;
+
+            if history.is_empty() {
+                println!("No hay historial persistido para {target}");
+            } else {
+                println!("Historial de drift para {target}:");
+                for item in history {
+                    println!(
+                        "- run_id={} | {} -> {} | findings={} | score={} | severity={}",
+                        item.run_id,
+                        item.older_snapshot_path,
+                        item.newer_snapshot_path,
+                        item.total_findings,
+                        item.total_score,
+                        item.overall_severity
+                    );
+                }
+            }
+        }
+
+        Commands::Findings {
+            target,
+            severity,
+            state,
+        } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let findings = store.list_findings(&target, severity.as_deref(), state.as_deref())?;
+
+            if findings.is_empty() {
+                println!("No hay findings persistidos para {target}");
+            } else {
+                println!("Findings persistidos para {target}:");
+                for item in findings {
+                    println!(
+                        "- id={} | severity={} | state={} | category={} | resource={} | score={}",
+                        item.finding_id,
+                        item.severity,
+                        item.state,
+                        item.category,
+                        item.resource,
+                        item.score
+                    );
+                }
+            }
+        }
+
+        Commands::Snapshots { target } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let snapshots = store.list_snapshots(&target)?;
+
+            if snapshots.is_empty() {
+                println!("No hay snapshots registrados para {target}");
+            } else {
+                println!("Snapshots registrados para {target}:");
+                for snapshot in snapshots {
+                    println!(
+                        "- id={} | ts={} | version={} | hash={} | path={}",
+                        snapshot.snapshot_id,
+                        snapshot.timestamp,
+                        snapshot.snapshot_version,
+                        snapshot.file_hash,
+                        snapshot.path
+                    );
+                }
+            }
+        }
+
+        Commands::Export {
+            target,
+            format,
+            output,
+            severity,
+            state,
+        } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let export_format = ExportFormat::from_str(&format)
+                .with_context(|| format!("formato no soportado: {format}"))?;
+
+            store.export_findings(
+                &target,
+                severity.as_deref(),
+                state.as_deref(),
+                export_format,
+                &output,
+            )?;
+
+            println!("Export completado en: {}", output.display());
+        }
+
+        Commands::Migrate { dir } => {
+            let report = atlas_snapshot::migrate_snapshots_in_dir(&dir)?;
+            println!(
+                "Migración completada. Archivos revisados: {} | migrados: {}",
+                report.scanned_files, report.migrated_files
+            );
+        }
+
+        Commands::Telemetry { limit } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let events = store.list_telemetry(limit)?;
+
+            if events.is_empty() {
+                println!("No hay eventos de telemetría.");
+            } else {
+                println!("Últimos eventos de telemetría:");
+                for event in events {
+                    println!(
+                        "- {} | command={} | target={} | duration_ms={}",
+                        event.created_at,
+                        event.name,
+                        event.target.unwrap_or_else(|| "-".to_string()),
+                        event.duration_ms
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn init_tracing(config: &AppConfig) -> Result<()> {
+    let filter =
+        EnvFilter::try_new(config.logging.level.clone()).unwrap_or_else(|_| EnvFilter::new("info"));
+
+    if config.logging.json {
+        fmt().with_env_filter(filter).json().init();
+    } else {
+        fmt().with_env_filter(filter).init();
+    }
+
+    Ok(())
+}
+
+fn record_telemetry_if_enabled(
+    config: &AppConfig,
+    store: Option<&AtlasStore>,
+    name: &str,
+    target: Option<&str>,
+    duration_ms: u128,
+    metadata: serde_json::Value,
+) -> Result<()> {
+    if config.telemetry.enabled {
+        if let Some(store) = store {
+            store.record_telemetry(name, target, duration_ms, &metadata)?;
         }
     }
 
@@ -223,13 +574,6 @@ fn print_human_drift_report(report: &atlas_drift::DriftReport) {
     println!("  - Persistent: {}", report.summary.states.persistent);
     println!("  - Suppressed: {}", report.summary.states.suppressed);
 
-    println!();
-    println!("Distribución por tipo de activo:");
-    println!("  - IPs: {}", report.summary.asset_types.ips);
-    println!("  - Subdominios: {}", report.summary.asset_types.subdomains);
-    println!("  - Servicios: {}", report.summary.asset_types.services);
-    println!("  - Unknown: {}", report.summary.asset_types.unknown);
-
     if !report.suppressed_findings.is_empty() {
         println!();
         println!(
@@ -254,9 +598,9 @@ fn print_human_drift_report(report: &atlas_drift::DriftReport) {
 
         for finding in &group.findings {
             println!(
-                "      [{}] {} | categoría={} | tipo={} | entorno={} | criticidad={} | estado={} | score={}",
-                finding.severity,
+                "      [{}] id={} | categoría={} | tipo={} | entorno={} | criticidad={} | estado={} | score={}",
                 finding.title,
+                finding.finding_id,
                 finding.category,
                 finding.asset_type,
                 finding.environment,
@@ -306,16 +650,6 @@ fn print_human_timeline_report(report: &atlas_drift::TimelineReport) {
         "  - Hallazgos persistentes: {}",
         report.executive.persistent_findings
     );
-
-    println!();
-    println!("Distribución histórica por tipo de activo:");
-    println!("  - IPs: {}", report.executive.asset_types.ips);
-    println!(
-        "  - Subdominios: {}",
-        report.executive.asset_types.subdomains
-    );
-    println!("  - Servicios: {}", report.executive.asset_types.services);
-    println!("  - Unknown: {}", report.executive.asset_types.unknown);
 
     if !report.executive.top_resources.is_empty() {
         println!();

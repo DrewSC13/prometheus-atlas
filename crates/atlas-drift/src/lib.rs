@@ -3,6 +3,7 @@ use atlas_diff::{DiffReport, ServiceChange};
 use atlas_snapshot::Snapshot;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::net::IpAddr;
@@ -110,6 +111,7 @@ impl std::fmt::Display for FindingState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriftFinding {
+    pub finding_id: String,
     pub severity: Severity,
     pub score: u32,
     pub category: String,
@@ -412,7 +414,10 @@ pub fn analyze_diff_with_policy(diff: &DiffReport, policy: Option<&DriftPolicy>)
         adjust_for_baseline(finding, policy);
     }
 
-    let (suppressed_findings, active_findings) = apply_policy(findings, policy, now);
+    let (mut suppressed_findings, mut active_findings) = apply_policy(findings, policy, now);
+    normalize_finding_collection(&mut active_findings, &diff.target);
+    normalize_finding_collection(&mut suppressed_findings, &diff.target);
+
     let groups = group_findings(&active_findings);
     let summary = summarize(&active_findings, &suppressed_findings);
 
@@ -462,6 +467,9 @@ pub fn build_timeline_report(
 
             history.insert(key, seen + 1);
         }
+
+        normalize_finding_collection(&mut report.findings, target);
+        normalize_finding_collection(&mut report.suppressed_findings, target);
 
         report.groups = group_findings(&report.findings);
         report.summary = summarize(&report.findings, &report.suppressed_findings);
@@ -865,6 +873,7 @@ fn build_base_finding(spec: FindingSpec) -> DriftFinding {
     let asset_type = infer_asset_type(&spec.resource);
 
     DriftFinding {
+        finding_id: String::new(),
         severity: spec.severity,
         score: spec.score,
         category: spec.category,
@@ -877,6 +886,21 @@ fn build_base_finding(spec: FindingSpec) -> DriftFinding {
         tags: spec.tags,
         description: spec.description,
     }
+}
+
+fn normalize_finding_collection(findings: &mut [DriftFinding], target: &str) {
+    for finding in findings {
+        finding.tags.sort();
+        finding.tags.dedup();
+        finding.finding_id = normalized_finding_id(target, &finding.category, &finding.resource);
+    }
+}
+
+pub fn normalized_finding_id(target: &str, category: &str, resource: &str) -> String {
+    let raw = format!("{target}|{category}|{resource}");
+    let digest = Sha256::digest(raw.as_bytes());
+    let hex = hex::encode(digest);
+    hex[..24].to_string()
 }
 
 fn infer_environment_with_policy(resource: &str, policy: Option<&DriftPolicy>) -> Environment {
@@ -1096,6 +1120,7 @@ mod tests {
 
     fn snapshot_with_target(target: &str) -> Snapshot {
         Snapshot {
+            snapshot_version: 2,
             timestamp: Utc::now(),
             target: target.to_string(),
             scan: ScanResult {
@@ -1197,5 +1222,13 @@ mod tests {
         });
 
         assert!(matches!(finding.asset_type, AssetType::Service));
+    }
+
+    #[test]
+    fn finding_id_is_stable() {
+        let a = normalized_finding_id("example.com", "new_ip", "2.2.2.2");
+        let b = normalized_finding_id("example.com", "new_ip", "2.2.2.2");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 24);
     }
 }
