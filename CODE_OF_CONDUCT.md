@@ -1,44 +1,42 @@
-# CODE_OF_CONDUCT.md
+# Código de conducta
 
-# Código de Conducta
+Prometheus Atlas sigue principios de respeto, colaboración y aprendizaje.
 
-Prometheus Atlas busca construir una comunidad técnica respetuosa y colaborativa.
+## Nuestro compromiso
 
----
+Queremos que la comunidad sea:
 
-# Comportamiento Esperado
+- respetuosa
+- inclusiva
+- colaborativa
+
+## Conducta esperada
 
 Los participantes deben:
 
-- comunicarse con respeto
-- aportar críticas constructivas
-- aceptar opiniones diversas
+- tratar a otros con respeto
+- aceptar críticas constructivas
+- colaborar de forma positiva
 
----
+## Conducta inaceptable
 
-# Comportamientos Inaceptables
-
-No se toleran:
+No se tolera:
 
 - acoso
+- insultos
 - discriminación
 - ataques personales
-- comportamiento disruptivo
 
----
+## Cumplimiento
 
-# Aplicación
+Los mantenedores pueden tomar medidas si estas normas no se respetan.
 
-Los mantenedores pueden eliminar contribuciones que violen este código de conducta.
+Estas medidas pueden incluir:
 
-Las violaciones repetidas pueden resultar en exclusión del proyecto.
+- advertencias
+- eliminación de contenido
+- exclusión del proyecto
 
----
+## Objetivo
 
-# Objetivo
-
-Crear un entorno seguro para:
-
-- investigadores de seguridad
-- desarrolladores
-- ingenieros de infraestructura
+Mantener una comunidad sana y productiva alrededor del proyecto.

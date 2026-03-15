@@ -1,179 +1,380 @@
-# README.md
-
 # Prometheus Atlas
 
-**Inteligencia de Deriva de Seguridad para Infraestructura Cloud-Native**
+Plataforma de **Security Drift Intelligence**
 
-Prometheus Atlas es una plataforma de ciberseguridad diseñada para detectar **deriva de seguridad (Security Drift)** en infraestructuras modernas.
+Prometheus Atlas es una plataforma diseñada para **detectar, explicar y rastrear cambios en la superficie expuesta de infraestructura a lo largo del tiempo**.
 
-En lugar de limitarse a identificar vulnerabilidades o activos expuestos, Prometheus Atlas se enfoca en entender **cómo cambia la infraestructura a lo largo del tiempo y cómo esos cambios introducen nuevos riesgos de seguridad**.
-
-Las infraestructuras cloud modernas cambian constantemente:
-
-- nuevos servicios
-- nuevas APIs
-- nuevos subdominios
-- nuevos recursos cloud
-- nuevos despliegues
-- nuevas rutas entre servicios
-
-Estos cambios suelen generar **degradación silenciosa de la seguridad**, algo que las herramientas tradicionales rara vez detectan o explican correctamente.
-
-Prometheus Atlas busca resolver este problema.
+En lugar de limitarse a descubrir activos, Atlas analiza **cómo evoluciona la infraestructura** y transforma esos cambios en **inteligencia de seguridad accionable**.
 
 ---
 
-# Concepto Central
+# Estado del proyecto
 
-Las herramientas tradicionales de seguridad responden preguntas como:
+Fase actual: **Fase 11**
 
-- ¿Qué vulnerabilidades existen?
-- ¿Qué activos están expuestos?
-- ¿Qué configuraciones son inseguras?
+Arquitectura: **Workspace modular en Rust**
 
-Prometheus Atlas responde una pregunta diferente:
+Motor de drift: **funcional**
 
-> ¿Qué cambió en mi infraestructura y por qué ese cambio importa para la seguridad?
+Persistencia: **SQLite**
+
+Suite de pruebas: **aprobada**
+
+El sistema ya implementa el flujo completo:
+
+Descubrimiento  
+↓  
+Snapshot  
+↓  
+Diff  
+↓  
+Drift  
+↓  
+Correlación  
+↓  
+Episodios  
+↓  
+Persistencia  
+↓  
+Exportación  
+
+---
+
+# ¿Por qué existe Prometheus Atlas?
+
+La infraestructura moderna cambia constantemente.
+
+Ejemplos:
+
+- nuevos servicios desplegados
+- entornos temporales
+- DNS olvidados
+- endpoints expuestos
+- cambios de configuración
+- infraestructura efímera
+
+La mayoría de herramientas responden:
+
+**"¿Qué activos existen?"**
+
+Prometheus Atlas responde:
+
+**"¿Qué cambió y por qué importa?"**
 
 Este enfoque define una nueva categoría:
 
-**Security Drift Intelligence (Inteligencia de Deriva de Seguridad)**
+**Security Drift Intelligence**
 
 ---
 
-# Capacidades Principales (Visión)
+# Concepto central
 
-Prometheus Atlas combinará múltiples capacidades en una sola plataforma:
+Atlas modela la infraestructura como **un sistema que evoluciona en el tiempo**.
 
-- descubrimiento automático de activos
-- modelado de infraestructura mediante grafos
-- baselines dinámicos de seguridad
-- detección de deriva
-- priorización contextual del riesgo
-- correlación con CI/CD e Infrastructure-as-Code
+En lugar de escaneos aislados, utiliza una secuencia analítica:
 
-La plataforma transformará señales de infraestructura en **inteligencia de seguridad accionable**.
+Snapshot  
+↓  
+Diff  
+↓  
+Drift  
+↓  
+Timeline  
+↓  
+Correlación  
+↓  
+Episodios  
 
----
-
-# Estructura del Repositorio
-
-Este repositorio utiliza una arquitectura **monorepo basada en un workspace de Rust**.
-
-    prometheus-atlas/
-    │
-    ├── apps/
-    │   └── scanner/          # CLI principal (atlas)
-    │
-    ├── crates/
-    │   ├── atlas-core
-    │   ├── atlas-discovery
-    │   ├── atlas-snapshot
-    │   ├── atlas-diff
-    │   └── atlas-output
-    │
-    ├── docs/
-    │   ├── architecture.md
-    │   ├── roadmap.md
-    │   └── vision.md
-    │
-    ├── infra/
-    ├── examples/
-    └── tests/
+Esto permite detectar **cambios reales en exposición de seguridad**.
 
 ---
 
-# Atlas CLI (Planeado)
+# Capacidades principales
 
-El primer componente del proyecto será **Prometheus Atlas Scanner**, una herramienta de línea de comandos.
+Descubrimiento de activos
 
-Ejemplo de uso:
+Resolución DNS
 
-    atlas scan ejemplo.com
-    atlas snapshot guardar
-    atlas diff snapshot_viejo.json snapshot_nuevo.json
+Fingerprint HTTP
 
-Esta herramienta permitirá:
+Generación de snapshots
 
-- descubrir activos de infraestructura
-- generar snapshots de infraestructura
-- detectar cambios entre snapshots
-- identificar posibles derivas de seguridad
+Versionado de snapshots
 
----
+Comparación entre estados de infraestructura
 
-# Stack Tecnológico
+Detección de drift de seguridad
 
-Prometheus Atlas utiliza tecnologías modernas:
+Motor de políticas
 
-| Capa | Tecnología |
-|------|------------|
-| Motor de descubrimiento | Rust |
-| Análisis de deriva | Python |
-| Procesamiento de datos | Rust + Python |
-| Modelado de infraestructura | Bases de datos de grafos |
-| Almacenamiento de eventos | ClickHouse |
-| Mensajería | NATS |
-| Interfaz web | Next.js |
+Gestión de baseline
 
----
+Excepciones temporales
 
-# Estado del Proyecto
+Análisis histórico
 
-Proyecto en etapa temprana de desarrollo.
+Correlación de hallazgos
 
-El enfoque inicial es construir el **scanner MVP** con:
+Episodios de riesgo
 
-- descubrimiento pasivo
-- snapshots de infraestructura
-- detección de cambios
-- exportación JSON
+Persistencia
+
+Exportación
+
+Jobs programables
+
+Scheduler
+
+Telemetría interna
 
 ---
 
-# Aviso de Seguridad
+# Flujo típico de uso
 
-Esta herramienta está destinada únicamente para:
+Escanear objetivo
 
-- investigación en ciberseguridad
-- auditorías autorizadas
+cargo run -p atlas -- scan example.com
 
-Solo debes escanear sistemas:
+Crear snapshot
 
-- que te pertenezcan
-- o para los que tengas permiso explícito
+cargo run -p atlas -- snapshot example.com --persist
 
-El uso indebido puede violar leyes o políticas de seguridad.
+Comparar snapshots
+
+cargo run -p atlas -- diff old.json new.json
+
+Detectar drift
+
+cargo run -p atlas -- drift old.json new.json
+
+Ver timeline
+
+cargo run -p atlas -- timeline example.com
+
+Generar episodios
+
+cargo run -p atlas -- episodes example.com
+
+Exportar findings
+
+cargo run -p atlas -- export example.com --format json
 
 ---
 
-# Contribuciones
+# Arquitectura
 
-Se aceptan contribuciones de:
+Prometheus Atlas está construido como un **workspace modular en Rust**.
 
-- investigadores de seguridad
-- desarrolladores Rust
-- ingenieros DevSecOps
+Cada dominio del sistema se encuentra en un crate independiente.
 
-Consulta el archivo:
+apps
 
-**CONTRIBUTING.md**
+scanner (CLI principal)
+
+crates
+
+atlas-config  
+atlas-core  
+atlas-discovery  
+atlas-dns  
+atlas-http  
+atlas-snapshot  
+atlas-diff  
+atlas-drift  
+atlas-correlation  
+atlas-episodes  
+atlas-store  
+atlas-output  
+atlas-jobs  
+atlas-scheduler  
+atlas-plugins  
+
+Esta arquitectura permite evolución modular hacia una **plataforma completa**.
+
+---
+
+# Arquitectura de alto nivel
+
+Usuario
+
+↓
+
+CLI Atlas
+
+↓
+
+Motor de descubrimiento
+
+↓
+
+Snapshots
+
+↓
+
+Motor de diff
+
+↓
+
+Motor de drift
+
+↓
+
+Correlación
+
+↓
+
+Episodios
+
+↓
+
+Persistencia
+
+↓
+
+Exportación
+
+---
+
+# Diferenciadores
+
+## El cambio es la unidad de análisis
+
+Atlas no solo analiza el estado actual. Analiza **la transición entre estados**.
+
+---
+
+## Drift semántico
+
+Los cambios se clasifican como:
+
+Nuevo  
+Recurrente  
+Persistente  
+Suprimido  
+Resuelto  
+
+---
+
+## Explainability
+
+Cada hallazgo incluye explicación de:
+
+- qué cambió
+- por qué se generó el score
+- qué factores influyeron
+
+---
+
+## Memoria histórica
+
+Atlas registra la evolución de la superficie expuesta.
+
+Ejemplo:
+
+Un panel de administración aparece, desaparece y vuelve a aparecer.
+
+Ese patrón revela **riesgo operativo real**.
+
+---
+
+## Episodios de riesgo
+
+Múltiples hallazgos pueden formar **eventos de riesgo complejos**.
+
+Ejemplo:
+
+Nuevo DNS  
++  
+Nuevo servicio HTTP  
++  
+Panel de login expuesto
+
+Esto representa un evento de despliegue inseguro.
+
+---
+
+# Casos de uso
+
+Monitoreo de superficie de ataque externa
+
+Detección de cambios de infraestructura
+
+Análisis histórico de exposición
+
+Reconocimiento de red para red teams
+
+Auditoría de cambios de seguridad
+
+Verificación de despliegues DevOps
+
+---
+
+# Roadmap
+
+Fase 12
+
+API backend
+
+Fase 13
+
+Frontend visual
+
+Fase 14
+
+Analítica avanzada con Python
+
+Fase 15
+
+Integraciones externas
+
+Fase 16
+
+Multiusuario
+
+Fase 17
+
+Plataforma madura
+
+---
+
+# Filosofía del proyecto
+
+Prometheus Atlas no intenta ser solo otro escáner.
+
+Su objetivo es responder preguntas como:
+
+Qué cambió  
+Cuándo cambió  
+Qué riesgo introduce  
+Si ese cambio ya ocurrió antes  
+Cómo debe priorizarse  
+
+Este enfoque define la categoría:
+
+**Security Drift Intelligence**
 
 ---
 
 # Licencia
 
-Apache License 2.0
+MIT License
+
+Ver archivo LICENSE.
 
 ---
 
-# Autor
+# Contribuciones
 
-Claudio Andres Sanjines Cuellar  
-Investigación y Desarrollo en Ciberseguridad
+Las contribuciones son bienvenidas.
+
+Ver:
+
+CONTRIBUTING.md
 
 ---
 
-# Visión
+# Seguridad
 
-Prometheus Atlas busca convertirse en la **fuente de verdad sobre cambios en infraestructura y deriva de seguridad en entornos cloud-native**.
+Para reportar vulnerabilidades consultar:
+
+SECURITY.md

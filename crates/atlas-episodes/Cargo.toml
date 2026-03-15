@@ -1,5 +1,5 @@
 [package]
-name = "atlas-http"
+name = "atlas-episodes"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,10 +7,8 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-anyhow.workspace = true
-futures.workspace = true
-reqwest.workspace = true
+chrono.workspace = true
 serde.workspace = true
-tokio.workspace = true
 
-atlas-core = { path = "../atlas-core" }
+atlas-correlation = { path = "../atlas-correlation" }
+atlas-drift = { path = "../atlas-drift" }

@@ -1,75 +1,265 @@
-# docs/architecture.md
-
 # Arquitectura de Prometheus Atlas
 
-Prometheus Atlas está diseñado como una plataforma modular.
+Estado actual: **Fase 11**
+
+La arquitectura del proyecto se basa en un workspace modular de Rust que separa claramente los dominios funcionales del sistema.
 
 ---
 
-# Capas Principales
+# Principios arquitectónicos
 
-## Capa de Descubrimiento
+La arquitectura sigue los siguientes principios:
 
-Recolecta señales desde infraestructura.
-
-Fuentes:
-
-- DNS
-- Certificate Transparency
-- metadata HTTP
-- APIs cloud
-- eventos CI/CD
+- separación clara de responsabilidades
+- crates independientes por dominio
+- desacoplamiento entre motor y salida
+- persistencia aislada
+- facilidad de testeo
+- evolución hacia servicio backend
 
 ---
 
-## Capa de Normalización
+# Vista general
 
-Convierte señales crudas en activos estructurados.
+Usuario
 
-Ejemplos:
+↓
 
-- dominios
-- servicios
-- APIs
-- endpoints
-- recursos cloud
+CLI (apps/scanner)
 
----
+↓
 
-## Capa de Inteligencia de Grafos
+Motor Atlas
 
-Los activos se conectan en un **grafo de infraestructura vivo**.
+↓
 
-Permite modelar:
-
-- dependencias entre servicios
-- rutas de exposición
-- relaciones de confianza
+Persistencia y reporting
 
 ---
 
-## Capa de Detección de Deriva
+# Organización del workspace
 
-Compara:
+prometheus-atlas/
 
-- estado esperado de la infraestructura
-- estado actual
+apps/
 
-Detecta cambios relevantes.
+scanner (CLI principal)
+
+crates/
+
+atlas-config  
+atlas-core  
+atlas-correlation  
+atlas-diff  
+atlas-discovery  
+atlas-dns  
+atlas-drift  
+atlas-episodes  
+atlas-http  
+atlas-jobs  
+atlas-output  
+atlas-plugins  
+atlas-scheduler  
+atlas-snapshot  
+atlas-store
+
+docs/
+
+architecture.md  
+vision.md  
+roadmap.md
 
 ---
 
-## Capa de Priorización de Riesgo
+# Componentes principales
 
-Evalúa riesgo considerando:
+## apps/scanner
 
-- exposición
-- entorno
-- conectividad
-- sensibilidad de datos
+CLI principal que orquesta:
+
+- scan
+- snapshot
+- diff
+- drift
+- timeline
+- episodes
+- export
+- jobs
 
 ---
 
-## Capa de Alertas
+## atlas-config
 
-Solo genera alertas cuando la deriva tiene impacto real en seguridad.
+Gestión de configuración:
+
+- logging
+- storage
+- telemetry
+- jobs
+- profiles
+
+---
+
+## atlas-discovery
+
+Motor de descubrimiento.
+
+Integra:
+
+- atlas-dns
+- atlas-http
+
+---
+
+## atlas-dns
+
+Resolución DNS y descubrimiento básico de subdominios.
+
+---
+
+## atlas-http
+
+Fingerprint HTTP:
+
+- tecnologías
+- headers
+- status codes
+- fingerprint tecnológico
+
+---
+
+## atlas-snapshot
+
+Gestión de snapshots:
+
+- creación
+- serialización
+- migración
+
+---
+
+## atlas-diff
+
+Comparación estructurada entre snapshots.
+
+Detecta:
+
+- activos nuevos
+- activos removidos
+- cambios de servicios
+
+---
+
+## atlas-drift
+
+Motor principal del sistema.
+
+Responsable de:
+
+- clasificación de drift
+- scoring
+- severidad
+- criticidad
+- policy engine
+- baseline
+- temporary exceptions
+- timeline summary
+
+---
+
+## atlas-correlation
+
+Agrupa hallazgos relacionados.
+
+---
+
+## atlas-episodes
+
+Construye episodios de riesgo basados en correlación.
+
+---
+
+## atlas-store
+
+Persistencia SQLite:
+
+- snapshots
+- drift runs
+- findings
+- jobs
+- telemetry
+
+---
+
+## atlas-jobs
+
+Modelo de jobs programables.
+
+---
+
+## atlas-scheduler
+
+Ejecuta jobs pendientes.
+
+---
+
+## atlas-output
+
+Renderizado humano y JSON.
+
+---
+
+## atlas-plugins
+
+Base para extensiones futuras.
+
+---
+
+# Flujo principal
+
+scan → snapshot → diff → drift → timeline → correlation → episodes → store
+
+---
+
+# Persistencia
+
+Actualmente SQLite guarda:
+
+- snapshots
+- drift runs
+- findings
+- telemetry
+- jobs
+- baseline
+
+---
+
+# Estado arquitectónico
+
+El sistema ya posee:
+
+- arquitectura modular sólida
+- separación clara de dominios
+- persistencia estable
+- motor funcional completo
+
+---
+
+# Próxima evolución
+
+Fase 12:
+
+- API REST
+- backend service
+- workers
+- separación CLI/backend
+
+Fase 13:
+
+- frontend
+- visualización de drift
+
+Fase 14:
+
+- analítica avanzada
+- integración Python

@@ -1,24 +1,29 @@
+[storage]
+path = ".atlas/atlas.db"
+
 [logging]
 level = "info"
 json = false
 
-[storage]
-backend = "sqlite"
-path = ".atlas/atlas.db"
-
-[scanner]
-timeout_seconds = 5
-follow_redirects = true
-
-[drift]
-profile = "standard"
-persist_by_default = true
-
-[output]
-default_format = "human"
-
 [telemetry]
 enabled = true
 
+[drift]
+persist_by_default = true
+profile = "standard"
+
 [plugins]
-enabled = ["criticality-tag", "state-tag", "normalize-tags"]
+enabled = []
+
+[jobs]
+default_interval_seconds = 3600
+
+[[profiles]]
+name = "standard"
+ports = [80, 443]
+timeout_ms = 3000
+
+[[profiles]]
+name = "deep"
+ports = [80, 443, 8080, 8443]
+timeout_ms = 5000

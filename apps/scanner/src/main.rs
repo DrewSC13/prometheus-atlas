@@ -1,5 +1,9 @@
 use anyhow::{Context, Result};
 use atlas_config::AppConfig;
+use atlas_correlation::{
+    build_episodes, build_resource_lineage, build_timeline_episodes, explain_finding,
+};
+use atlas_jobs::{scheduler_plan, AtlasJob};
 use atlas_plugins::default_registry_for;
 use atlas_store::{AtlasStore, ExportFormat};
 use clap::{Parser, Subcommand};
@@ -31,6 +35,9 @@ enum Commands {
     Scan {
         target: String,
 
+        #[arg(long, default_value = "standard")]
+        profile: String,
+
         #[arg(long)]
         json: bool,
 
@@ -43,6 +50,9 @@ enum Commands {
 
         #[arg(long, default_value = ".snapshots")]
         dir: PathBuf,
+
+        #[arg(long, default_value = "standard")]
+        profile: String,
 
         #[arg(long)]
         persist: bool,
@@ -70,6 +80,9 @@ enum Commands {
         persist: bool,
 
         #[arg(long)]
+        profile: Option<String>,
+
+        #[arg(long)]
         json: bool,
 
         #[arg(long)]
@@ -90,6 +103,37 @@ enum Commands {
 
         #[arg(long)]
         output: Option<PathBuf>,
+    },
+
+    Episodes {
+        target: String,
+
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    Explain {
+        target: String,
+
+        #[arg(long)]
+        resource: String,
+    },
+
+    PolicyValidate {
+        path: PathBuf,
+    },
+
+    PolicyExplain {
+        path: PathBuf,
     },
 
     History {
@@ -125,6 +169,47 @@ enum Commands {
         #[arg(long)]
         state: Option<String>,
     },
+
+    BaselineApprove {
+        resource: String,
+
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
+
+    BaselineRevoke {
+        resource: String,
+    },
+
+    BaselineList,
+
+    JobCreate {
+        target: String,
+
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        #[arg(long, default_value = "standard")]
+        profile: String,
+
+        #[arg(long)]
+        interval: Option<u64>,
+    },
+
+    JobList,
+
+    JobDisable {
+        job_id: String,
+    },
+
+    JobRun {
+        job_id: String,
+
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+    },
+
+    SchedulerPlan,
 
     Migrate {
         #[arg(long, default_value = ".snapshots")]
@@ -181,10 +266,12 @@ async fn main() -> Result<()> {
 
         Commands::Scan {
             target,
+            profile,
             json: want_json,
             output,
         } => {
             let started = Instant::now();
+            let _profile = config.profile(&profile)?;
             let result = atlas_discovery::scan_target(&target).await?;
 
             if want_json {
@@ -203,7 +290,8 @@ async fn main() -> Result<()> {
                 json!({
                     "resolved_ips": result.resolved_ips.len(),
                     "subdomains": result.subdomains.len(),
-                    "services": result.services.len()
+                    "services": result.services.len(),
+                    "profile": profile
                 }),
             )?;
         }
@@ -211,9 +299,11 @@ async fn main() -> Result<()> {
         Commands::Snapshot {
             target,
             dir,
+            profile,
             persist,
         } => {
             let started = Instant::now();
+            let _profile = config.profile(&profile)?;
             let result = atlas_discovery::scan_target(&target).await?;
             let snapshot = atlas_snapshot::Snapshot::new(result);
             let path = atlas_snapshot::save_snapshot(&snapshot, &dir)?;
@@ -236,7 +326,8 @@ async fn main() -> Result<()> {
                 started.elapsed().as_millis(),
                 json!({
                     "path": path.display().to_string(),
-                    "persisted": should_persist
+                    "persisted": should_persist,
+                    "profile": profile
                 }),
             )?;
         }
@@ -263,6 +354,7 @@ async fn main() -> Result<()> {
             newer,
             policy,
             persist,
+            profile,
             json: want_json,
             output,
         } => {
@@ -271,8 +363,15 @@ async fn main() -> Result<()> {
             let newer_snapshot = atlas_snapshot::load_snapshot(&newer)?;
             let diff = atlas_diff::diff_snapshots(&older_snapshot, &newer_snapshot);
 
+            let profile_name = profile.unwrap_or_else(|| config.drift.profile.clone());
+            let _profile = config.profile(&profile_name)?;
+
             let policy_loaded = match policy.as_deref() {
-                Some(path) => Some(atlas_drift::DriftPolicy::load_from_path(path)?),
+                Some(path) => {
+                    let loaded = atlas_drift::DriftPolicy::load_from_path(path)?;
+                    loaded.validate()?;
+                    Some(loaded)
+                }
                 None => None,
             };
 
@@ -312,7 +411,8 @@ async fn main() -> Result<()> {
                     "findings": drift.findings.len(),
                     "suppressed": drift.suppressed_findings.len(),
                     "score": drift.summary.total_score,
-                    "persisted": should_persist
+                    "persisted": should_persist,
+                    "profile": profile_name
                 }),
             )?;
         }
@@ -328,7 +428,11 @@ async fn main() -> Result<()> {
             let snapshots = atlas_snapshot::load_all_snapshots_for_target(&dir, &target)?;
 
             let policy_loaded = match policy.as_deref() {
-                Some(path) => Some(atlas_drift::DriftPolicy::load_from_path(path)?),
+                Some(path) => {
+                    let loaded = atlas_drift::DriftPolicy::load_from_path(path)?;
+                    loaded.validate()?;
+                    Some(loaded)
+                }
                 None => None,
             };
 
@@ -358,6 +462,98 @@ async fn main() -> Result<()> {
                     "total_score": timeline.executive.total_score
                 }),
             )?;
+        }
+
+        Commands::Episodes {
+            target,
+            dir,
+            policy,
+            json: want_json,
+            output,
+        } => {
+            let snapshots = atlas_snapshot::load_all_snapshots_for_target(&dir, &target)?;
+
+            let policy_loaded = match policy.as_deref() {
+                Some(path) => {
+                    let loaded = atlas_drift::DriftPolicy::load_from_path(path)?;
+                    loaded.validate()?;
+                    Some(loaded)
+                }
+                None => None,
+            };
+
+            let timeline =
+                atlas_drift::build_timeline_report(&target, &snapshots, policy_loaded.as_ref())?;
+
+            let episodes = build_timeline_episodes(&timeline);
+
+            if want_json {
+                atlas_output::write_json_output(&episodes, output.as_deref())?;
+            } else {
+                print_human_episodes(&episodes);
+            }
+        }
+
+        Commands::Explain { target, resource } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let findings = store.list_findings(&target, None, None)?;
+
+            let matched: Vec<_> = findings
+                .into_iter()
+                .filter(|f| f.resource == resource)
+                .collect();
+
+            if matched.is_empty() {
+                println!("No se encontraron findings para el recurso {resource}");
+            } else {
+                println!("Explicación para {resource}:");
+                for item in matched {
+                    let synthetic = atlas_drift::DriftFinding {
+                        finding_id: item.finding_id.clone(),
+                        severity: parse_severity(&item.severity),
+                        score: item.score,
+                        category: item.category.clone(),
+                        title: item.category.clone(),
+                        resource: item.resource.clone(),
+                        asset_type: parse_asset_type(&item.asset_type),
+                        environment: parse_environment(&item.environment),
+                        criticality: parse_criticality(&item.criticality),
+                        state: parse_state(&item.state),
+                        tags: item.tags.clone(),
+                        description: item.description.clone(),
+                    };
+
+                    let explanation = explain_finding(&synthetic);
+
+                    println!(
+                        "- finding_id={} | base_score={} | final_score={} | multiplier={}",
+                        explanation.finding_id,
+                        explanation.base_score,
+                        explanation.final_score,
+                        explanation.criticality_multiplier
+                    );
+
+                    for reason in explanation.reasons {
+                        println!("    • {}", reason);
+                    }
+                }
+            }
+        }
+
+        Commands::PolicyValidate { path } => {
+            let policy = atlas_drift::DriftPolicy::load_from_path(&path)?;
+            policy.validate()?;
+            println!("Policy válida: {}", path.display());
+        }
+
+        Commands::PolicyExplain { path } => {
+            let policy = atlas_drift::DriftPolicy::load_from_path(&path)?;
+            policy.validate()?;
+            println!("Resumen de policy {}:", path.display());
+            for line in policy.describe() {
+                println!("- {}", line);
+            }
         }
 
         Commands::History { target } => {
@@ -456,6 +652,132 @@ async fn main() -> Result<()> {
             println!("Export completado en: {}", output.display());
         }
 
+        Commands::BaselineApprove {
+            resource,
+            expires_at,
+        } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            store.approve_baseline(&resource, expires_at.as_deref())?;
+            println!("Baseline aprobado para {}", resource);
+        }
+
+        Commands::BaselineRevoke { resource } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            store.revoke_baseline(&resource)?;
+            println!("Baseline revocado para {}", resource);
+        }
+
+        Commands::BaselineList => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let baseline = store.list_baseline()?;
+
+            if baseline.is_empty() {
+                println!("No hay baseline aprobado.");
+            } else {
+                println!("Baseline entries:");
+                for entry in baseline {
+                    println!(
+                        "- resource={} | approved={} | expires_at={}",
+                        entry.resource,
+                        entry.approved,
+                        entry.expires_at.unwrap_or_else(|| "-".to_string())
+                    );
+                }
+            }
+        }
+
+        Commands::JobCreate {
+            target,
+            policy,
+            profile,
+            interval,
+        } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let _profile = config.profile(&profile)?;
+
+            let job = AtlasJob::new(
+                &target,
+                policy.as_ref().map(|p| p.display().to_string()),
+                &profile,
+                interval.unwrap_or(config.jobs.default_interval_seconds),
+            )?;
+
+            store.create_job(&job)?;
+            println!("Job creado: {} para {}", job.job_id, job.target);
+        }
+
+        Commands::JobList => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let jobs = store.list_jobs()?;
+
+            if jobs.is_empty() {
+                println!("No hay jobs registrados.");
+            } else {
+                println!("Jobs:");
+                for job in jobs {
+                    println!(
+                        "- id={} | target={} | profile={} | interval={}s | enabled={}",
+                        job.job_id, job.target, job.profile, job.interval_seconds, job.enabled
+                    );
+                }
+            }
+        }
+
+        Commands::JobDisable { job_id } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            store.set_job_enabled(&job_id, false)?;
+            println!("Job deshabilitado: {}", job_id);
+        }
+
+        Commands::JobRun { job_id, dir } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let jobs = store.list_jobs()?;
+
+            let job = jobs
+                .into_iter()
+                .find(|j| j.job_id == job_id)
+                .with_context(|| format!("job no encontrado: {job_id}"))?;
+
+            let _profile = config.profile(&job.profile)?;
+            let result = atlas_discovery::scan_target(&job.target).await?;
+            let snapshot = atlas_snapshot::Snapshot::new(result);
+            let path = atlas_snapshot::save_snapshot(&snapshot, &dir)?;
+            store.register_snapshot(&path, &snapshot)?;
+            store.touch_job_run(&job.job_id)?;
+
+            println!(
+                "Job ejecutado correctamente. target={} snapshot={}",
+                job.target,
+                path.display()
+            );
+        }
+
+        Commands::SchedulerPlan => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let jobs = store.list_jobs()?;
+            let plan = scheduler_plan(&jobs, chrono::Utc::now());
+
+            if plan.is_empty() {
+                println!("No hay jobs listos para ejecutar.");
+            } else {
+                println!("Jobs planificados:");
+                for item in plan {
+                    println!(
+                        "- job_id={} | target={} | profile={}",
+                        item.job_id, item.target, item.profile
+                    );
+                }
+            }
+        }
+
         Commands::Migrate { dir } => {
             let report = atlas_snapshot::migrate_snapshots_in_dir(&dir)?;
             println!(
@@ -519,6 +841,54 @@ fn record_telemetry_if_enabled(
     Ok(())
 }
 
+fn parse_severity(value: &str) -> atlas_drift::Severity {
+    match value {
+        "HIGH" | "High" => atlas_drift::Severity::High,
+        "MEDIUM" | "Medium" => atlas_drift::Severity::Medium,
+        "LOW" | "Low" => atlas_drift::Severity::Low,
+        _ => atlas_drift::Severity::Info,
+    }
+}
+
+fn parse_criticality(value: &str) -> atlas_drift::Criticality {
+    match value {
+        "CRITICAL" | "Critical" => atlas_drift::Criticality::Critical,
+        "HIGH" | "High" => atlas_drift::Criticality::High,
+        "MEDIUM" | "Medium" => atlas_drift::Criticality::Medium,
+        _ => atlas_drift::Criticality::Low,
+    }
+}
+
+fn parse_state(value: &str) -> atlas_drift::FindingState {
+    match value {
+        "Recurring" => atlas_drift::FindingState::Recurring,
+        "Persistent" => atlas_drift::FindingState::Persistent,
+        "Suppressed" => atlas_drift::FindingState::Suppressed,
+        "Resolved" => atlas_drift::FindingState::Resolved,
+        _ => atlas_drift::FindingState::New,
+    }
+}
+
+fn parse_asset_type(value: &str) -> atlas_drift::AssetType {
+    match value {
+        "Ip" => atlas_drift::AssetType::Ip,
+        "Subdomain" => atlas_drift::AssetType::Subdomain,
+        "Service" => atlas_drift::AssetType::Service,
+        _ => atlas_drift::AssetType::Unknown,
+    }
+}
+
+fn parse_environment(value: &str) -> atlas_drift::Environment {
+    match value {
+        "Production" => atlas_drift::Environment::Production,
+        "Admin" => atlas_drift::Environment::Admin,
+        "Development" => atlas_drift::Environment::Development,
+        "Staging" => atlas_drift::Environment::Staging,
+        "Test" => atlas_drift::Environment::Test,
+        _ => atlas_drift::Environment::Unknown,
+    }
+}
+
 fn print_human_diff_report(report: &atlas_diff::DiffReport) {
     println!("Target: {}", report.target);
     println!("Snapshot anterior: {}", report.older_timestamp);
@@ -573,6 +943,7 @@ fn print_human_drift_report(report: &atlas_drift::DriftReport) {
     println!("  - Recurring: {}", report.summary.states.recurring);
     println!("  - Persistent: {}", report.summary.states.persistent);
     println!("  - Suppressed: {}", report.summary.states.suppressed);
+    println!("  - Resolved: {}", report.summary.states.resolved);
 
     if !report.suppressed_findings.is_empty() {
         println!();
@@ -614,6 +985,31 @@ fn print_human_drift_report(report: &atlas_drift::DriftReport) {
             }
 
             println!("          {}", finding.description);
+        }
+    }
+
+    let episodes = build_episodes(report);
+    if !episodes.is_empty() {
+        println!();
+        println!("Episodes:");
+        for episode in episodes {
+            println!(
+                "  - id={} | category={:?} | severity={} | resource={} | score={}",
+                episode.episode_id,
+                episode.category,
+                episode.severity,
+                episode.resource,
+                episode.score
+            );
+        }
+    }
+
+    let lineage = build_resource_lineage(report);
+    if !lineage.is_empty() {
+        println!();
+        println!("Lineage detectado:");
+        for link in lineage {
+            println!("  - {} -> {} ({})", link.parent, link.child, link.relation);
         }
     }
 }
@@ -683,6 +1079,43 @@ fn print_human_timeline_report(report: &atlas_drift::TimelineReport) {
                 transition.newer_timestamp,
                 transition.report.findings.len(),
                 transition.report.summary.total_score
+            );
+        }
+    }
+
+    let episodes = build_timeline_episodes(report);
+    if !episodes.is_empty() {
+        println!();
+        println!("Episodes históricos:");
+        for episode in episodes {
+            println!(
+                "  - id={} | category={:?} | severity={} | resource={} | score={}",
+                episode.episode_id,
+                episode.category,
+                episode.severity,
+                episode.resource,
+                episode.score
+            );
+        }
+    }
+}
+
+fn print_human_episodes(episodes: &[atlas_correlation::RiskEpisode]) {
+    if episodes.is_empty() {
+        println!("No se detectaron episodes.");
+        return;
+    }
+
+    println!("Episodes:");
+    for episode in episodes {
+        println!(
+            "- id={} | category={:?} | severity={} | resource={} | score={}",
+            episode.episode_id, episode.category, episode.severity, episode.resource, episode.score
+        );
+        for finding in &episode.findings {
+            println!(
+                "    • {} | {} | {} | score={}",
+                finding.finding_id, finding.category, finding.resource, finding.score
             );
         }
     }

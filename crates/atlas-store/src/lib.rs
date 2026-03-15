@@ -1,5 +1,6 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use atlas_drift::{DriftFinding, DriftReport};
+use atlas_jobs::AtlasJob;
 use atlas_snapshot::{snapshot_file_hash, Snapshot};
 use chrono::Utc;
 use rusqlite::{params, Connection};
@@ -8,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug, Clone)]
 pub struct StoredSnapshotMeta {
@@ -52,6 +53,14 @@ pub struct StoredFindingRecord {
 }
 
 #[derive(Debug, Clone)]
+pub struct BaselineRecord {
+    pub resource: String,
+    pub approved: bool,
+    pub expires_at: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct TelemetryRecord {
     pub name: String,
     pub target: Option<String>,
@@ -88,13 +97,10 @@ pub struct AtlasStore {
 impl AtlasStore {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("no se pudo crear {}", parent.display()))?;
+            fs::create_dir_all(parent)?;
         }
 
-        let conn = Connection::open(path)
-            .with_context(|| format!("no se pudo abrir la base {}", path.display()))?;
-
+        let conn = Connection::open(path)?;
         Ok(Self {
             db_path: path.to_path_buf(),
             conn,
@@ -157,6 +163,24 @@ impl AtlasStore {
                 metadata_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS jobs (
+                job_id TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                policy_path TEXT,
+                profile TEXT NOT NULL,
+                interval_seconds INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                last_run_at TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS baseline_entries (
+                resource TEXT PRIMARY KEY,
+                approved INTEGER NOT NULL,
+                expires_at TEXT,
+                created_at TEXT NOT NULL
+            );
             "#,
         )?;
 
@@ -167,6 +191,11 @@ impl AtlasStore {
         if count == 0 {
             self.conn.execute(
                 "INSERT INTO schema_meta(version) VALUES (?1)",
+                params![SCHEMA_VERSION],
+            )?;
+        } else {
+            self.conn.execute(
+                "UPDATE schema_meta SET version = ?1",
                 params![SCHEMA_VERSION],
             )?;
         }
@@ -557,6 +586,128 @@ impl AtlasStore {
         }
 
         Ok(output)
+    }
+
+    pub fn create_job(&self, job: &AtlasJob) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO jobs (
+                job_id, target, policy_path, profile, interval_seconds, enabled, last_run_at, created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                job.job_id,
+                job.target,
+                job.policy_path,
+                job.profile,
+                job.interval_seconds,
+                if job.enabled { 1 } else { 0 },
+                job.last_run_at
+                    .map(|d: chrono::DateTime<chrono::Utc>| d.to_rfc3339()),
+                job.created_at.to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_jobs(&self) -> Result<Vec<AtlasJob>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT job_id, target, policy_path, profile, interval_seconds, enabled, last_run_at, created_at
+            FROM jobs
+            ORDER BY created_at ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let last_run_at: Option<String> = row.get(6)?;
+            let created_at: String = row.get(7)?;
+
+            Ok(AtlasJob {
+                job_id: row.get(0)?,
+                target: row.get(1)?,
+                policy_path: row.get(2)?,
+                profile: row.get(3)?,
+                interval_seconds: row.get(4)?,
+                enabled: row.get::<_, i64>(5)? == 1,
+                last_run_at: last_run_at
+                    .as_deref()
+                    .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+                    .map(|dt| dt.with_timezone(&Utc)),
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?;
+
+        let mut jobs = Vec::new();
+        for row in rows {
+            jobs.push(row?);
+        }
+
+        Ok(jobs)
+    }
+
+    pub fn set_job_enabled(&self, job_id: &str, enabled: bool) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET enabled = ?1 WHERE job_id = ?2",
+            params![if enabled { 1 } else { 0 }, job_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn touch_job_run(&self, job_id: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE jobs SET last_run_at = ?1 WHERE job_id = ?2",
+            params![now_rfc3339(), job_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn approve_baseline(&self, resource: &str, expires_at: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO baseline_entries(resource, approved, expires_at, created_at)
+            VALUES (?1, 1, ?2, ?3)
+            ON CONFLICT(resource) DO UPDATE SET approved = 1, expires_at = excluded.expires_at
+            "#,
+            params![resource, expires_at, now_rfc3339()],
+        )?;
+        Ok(())
+    }
+
+    pub fn revoke_baseline(&self, resource: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM baseline_entries WHERE resource = ?1",
+            params![resource],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_baseline(&self) -> Result<Vec<BaselineRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT resource, approved, expires_at, created_at
+            FROM baseline_entries
+            ORDER BY resource ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(BaselineRecord {
+                resource: row.get(0)?,
+                approved: row.get::<_, i64>(1)? == 1,
+                expires_at: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+
+        let mut records = Vec::new();
+        for row in rows {
+            records.push(row?);
+        }
+
+        Ok(records)
     }
 
     pub fn db_path(&self) -> &Path {

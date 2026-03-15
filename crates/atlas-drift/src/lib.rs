@@ -48,7 +48,7 @@ impl std::fmt::Display for Criticality {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Environment {
     Production,
     Admin,
@@ -90,12 +90,13 @@ impl std::fmt::Display for AssetType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum FindingState {
     New,
     Recurring,
     Persistent,
     Suppressed,
+    Resolved,
 }
 
 impl std::fmt::Display for FindingState {
@@ -105,6 +106,7 @@ impl std::fmt::Display for FindingState {
             FindingState::Recurring => write!(f, "Recurring"),
             FindingState::Persistent => write!(f, "Persistent"),
             FindingState::Suppressed => write!(f, "Suppressed"),
+            FindingState::Resolved => write!(f, "Resolved"),
         }
     }
 }
@@ -139,6 +141,7 @@ pub struct StateSummary {
     pub recurring: usize,
     pub persistent: usize,
     pub suppressed: usize,
+    pub resolved: usize,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -266,6 +269,77 @@ impl DriftPolicy {
             .with_context(|| format!("no se pudo parsear la policy {}", path.display()))?;
 
         Ok(policy)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        for pattern in &self.allowlisted_resources {
+            if pattern.trim().is_empty() {
+                bail!("allowlisted_resources contiene un patrón vacío");
+            }
+        }
+
+        for category in &self.allowlisted_categories {
+            if category.trim().is_empty() {
+                bail!("allowlisted_categories contiene una categoría vacía");
+            }
+        }
+
+        for resource in &self.critical_resources {
+            if resource.trim().is_empty() {
+                bail!("critical_resources contiene un recurso vacío");
+            }
+        }
+
+        for pattern in &self.critical_patterns {
+            if pattern.trim().is_empty() {
+                bail!("critical_patterns contiene un patrón vacío");
+            }
+        }
+
+        for override_rule in &self.environment_overrides {
+            if override_rule.pattern.trim().is_empty() {
+                bail!("environment_overrides contiene un patrón vacío");
+            }
+        }
+
+        for exception in &self.temporary_exceptions {
+            if exception.resource.trim().is_empty() {
+                bail!("temporary_exceptions contiene un resource vacío");
+            }
+            if exception.category.trim().is_empty() {
+                bail!("temporary_exceptions contiene un category vacío");
+            }
+        }
+
+        for resource in &self.baseline_resources {
+            if resource.trim().is_empty() {
+                bail!("baseline_resources contiene un recurso vacío");
+            }
+        }
+
+        for category in &self.baseline_categories {
+            if category.trim().is_empty() {
+                bail!("baseline_categories contiene una categoría vacía");
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn describe(&self) -> Vec<String> {
+        vec![
+            format!("allowlisted_resources={}", self.allowlisted_resources.len()),
+            format!(
+                "allowlisted_categories={}",
+                self.allowlisted_categories.len()
+            ),
+            format!("critical_resources={}", self.critical_resources.len()),
+            format!("critical_patterns={}", self.critical_patterns.len()),
+            format!("environment_overrides={}", self.environment_overrides.len()),
+            format!("temporary_exceptions={}", self.temporary_exceptions.len()),
+            format!("baseline_resources={}", self.baseline_resources.len()),
+            format!("baseline_categories={}", self.baseline_categories.len()),
+        ]
     }
 
     pub fn suppresses(&self, finding: &DriftFinding, now: DateTime<Utc>) -> bool {
@@ -516,7 +590,7 @@ fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecut
             match finding.state {
                 FindingState::Recurring => recurring_findings += 1,
                 FindingState::Persistent => persistent_findings += 1,
-                FindingState::New | FindingState::Suppressed => {}
+                FindingState::New | FindingState::Suppressed | FindingState::Resolved => {}
             }
 
             resource_map
@@ -1034,6 +1108,7 @@ fn summarize(findings: &[DriftFinding], suppressed: &[DriftFinding]) -> DriftSum
             FindingState::Recurring => summary.states.recurring += 1,
             FindingState::Persistent => summary.states.persistent += 1,
             FindingState::Suppressed => summary.states.suppressed += 1,
+            FindingState::Resolved => summary.states.resolved += 1,
         }
 
         if matches!(

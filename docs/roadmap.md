@@ -1,67 +1,247 @@
-# docs/roadmap.md
+# Roadmap de Prometheus Atlas
 
-# Hoja de Ruta
+Este documento describe la evolución planificada del proyecto.
 
-Esta hoja de ruta describe la evolución planeada del proyecto.
-
----
-
-# Fase 1 — Scanner MVP
-
-Objetivo: descubrimiento inicial.
-
-Funciones:
-
-- escaneo de dominios
-- descubrimiento pasivo
-- inventario de activos
-- exportación JSON
+Las fases están organizadas por incremento de capacidades.
 
 ---
 
-# Fase 2 — Motor de Snapshots
+# Fase 1 — Discovery inicial
 
-Funciones:
+Objetivo:
 
-- snapshots de infraestructura
-- almacenamiento de snapshots
-- comparación de snapshots
+Crear un escáner base capaz de descubrir servicios.
 
----
+Capacidades:
 
-# Fase 3 — Detección de Deriva
-
-Funciones:
-
-- detección de cambios
-- clasificación de deriva
-- priorización de riesgo
+- resolución DNS
+- detección de servicios HTTP
+- CLI inicial
+- salida JSON
 
 ---
 
-# Fase 4 — Grafo de Infraestructura
+# Fase 2 — Snapshots
 
-Funciones:
+Objetivo:
 
-- modelo de infraestructura basado en grafos
-- análisis de rutas de exposición
+Capturar estados completos de infraestructura.
 
----
+Capacidades:
 
-# Fase 5 — Conectores Cloud
-
-Funciones:
-
-- integración AWS
-- análisis IAM
-- monitoreo de buckets
+- generación de snapshots
+- serialización
+- almacenamiento en archivos
 
 ---
 
-# Fase 6 — Plataforma Atlas
+# Fase 3 — Diff
 
-Funciones:
+Objetivo:
 
-- interfaz web
-- monitoreo continuo
-- arquitectura multi-tenant
+Comparar snapshots.
+
+Capacidades:
+
+- detección de activos nuevos
+- detección de activos removidos
+- cambios de servicios
+
+---
+
+# Fase 4 — Drift engine
+
+Objetivo:
+
+Interpretar cambios como eventos de seguridad.
+
+Capacidades:
+
+- scoring inicial
+- clasificación de cambios
+
+---
+
+# Fase 5 — Policy engine
+
+Objetivo:
+
+Controlar hallazgos mediante reglas.
+
+Capacidades:
+
+- allowlists
+- supresión de findings
+
+---
+
+# Fase 6 — Timeline
+
+Objetivo:
+
+Construir historial de cambios.
+
+Capacidades:
+
+- timeline entre snapshots
+- reportes históricos
+
+---
+
+# Fase 7 — Asset classification
+
+Objetivo:
+
+Contextualizar hallazgos.
+
+Capacidades:
+
+- tipos de activos
+- criticidad
+
+---
+
+# Fase 8 — Fingerprint enriquecido
+
+Objetivo:
+
+Mejorar la detección de servicios.
+
+Capacidades:
+
+- detección de tecnologías
+- análisis de headers
+
+---
+
+# Fase 9 — Baseline adaptativo
+
+Objetivo:
+
+Diferenciar drift aceptado de drift riesgoso.
+
+Capacidades:
+
+- baseline
+- excepciones temporales
+
+---
+
+# Fase 10 — Endurecimiento
+
+Objetivo:
+
+Estabilizar la plataforma.
+
+Capacidades:
+
+- versionado de schema
+- migración de snapshots
+- normalización de findings
+- configuración formal
+- sistema de plugins
+- logging
+- telemetría
+- suite de tests
+
+---
+
+# Fase 11 — Orquestación
+
+Objetivo:
+
+Convertir el motor en sistema operable.
+
+Capacidades:
+
+- correlación
+- episodios
+- jobs
+- scheduler
+- explainability
+- persistencia completa
+
+---
+
+# Fase 12 — Backend
+
+Objetivo:
+
+Separar CLI y servicio.
+
+Capacidades:
+
+- API REST
+- workers
+- backend persistente
+
+---
+
+# Fase 13 — Frontend
+
+Objetivo:
+
+Visualización operativa.
+
+Capacidades:
+
+- dashboards
+- timeline visual
+- findings
+- episodios
+
+---
+
+# Fase 14 — Analítica avanzada
+
+Objetivo:
+
+Mejorar priorización.
+
+Capacidades:
+
+- clustering
+- scoring adaptativo
+- análisis Python
+
+---
+
+# Fase 15 — Integraciones
+
+Objetivo:
+
+Integración con ecosistema.
+
+Capacidades:
+
+- Slack
+- SIEM
+- ticketing
+
+---
+
+# Fase 16 — Multiusuario
+
+Objetivo:
+
+Uso organizacional.
+
+Capacidades:
+
+- autenticación
+- permisos
+- multi-tenant
+
+---
+
+# Fase 17 — Producto maduro
+
+Objetivo:
+
+Consolidación de plataforma.
+
+Capacidades:
+
+- estabilidad
+- escalabilidad
+- experiencia completa de usuario

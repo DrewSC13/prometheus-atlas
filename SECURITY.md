@@ -1,48 +1,42 @@
-# SECURITY.md
+# Política de seguridad
 
-# Política de Seguridad
+La seguridad del proyecto es importante.
 
-Prometheus Atlas es un proyecto de investigación en ciberseguridad.
+Si descubres una vulnerabilidad en Prometheus Atlas, por favor repórtala de manera responsable.
 
-Las vulnerabilidades deben reportarse de manera responsable.
+## Cómo reportar vulnerabilidades
 
----
+En lugar de abrir un issue público, envía un reporte privado.
 
-# Reporte de Vulnerabilidades
+Incluye:
 
-No abras issues públicos para vulnerabilidades.
+- descripción de la vulnerabilidad
+- pasos para reproducir
+- impacto potencial
+- versión afectada
 
-En su lugar reporta de forma privada.
+## Proceso de respuesta
 
-Contacto:
+El proceso típico será:
 
-Claudio Andres Sanjines Cuellar  
-GitHub: DrewSC13
+1. Confirmación del reporte
+2. Análisis del problema
+3. Desarrollo de parche
+4. Publicación de fix
 
----
+## Alcance
 
-# Alcance
+Las áreas relevantes incluyen:
 
-Las vulnerabilidades pueden incluir:
+- manejo de red
+- parsing de datos externos
+- persistencia
+- ejecución de plugins
 
-- ejecución remota de código
-- escalamiento de privilegios
-- exposición de datos sensibles
-- debilidades criptográficas
-- vulnerabilidades en dependencias
+## Buenas prácticas
 
----
+Se recomienda:
 
-# Divulgación Responsable
-
-Seguimos principios de divulgación responsable:
-
-1. Reportar vulnerabilidad de forma privada
-2. Mantener confidencialidad durante investigación
-3. Coordinar tiempos de divulgación
-
----
-
-# Reconocimiento
-
-Los investigadores que reporten vulnerabilidades de forma responsable pueden ser reconocidos en el proyecto.
+- revisar dependencias
+- mantener crates actualizados
+- usar herramientas de análisis estático
