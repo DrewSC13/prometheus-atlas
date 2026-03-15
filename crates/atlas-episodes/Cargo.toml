@@ -7,8 +7,10 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 chrono.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 
 atlas-correlation = { path = "../atlas-correlation" }
 atlas-drift = { path = "../atlas-drift" }

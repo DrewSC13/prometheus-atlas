@@ -9,10 +9,13 @@ repository.workspace = true
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+hex.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 atlas-drift = { path = "../atlas-drift" }
+atlas-episodes = { path = "../atlas-episodes" }
 atlas-jobs = { path = "../atlas-jobs" }
 atlas-snapshot = { path = "../atlas-snapshot" }

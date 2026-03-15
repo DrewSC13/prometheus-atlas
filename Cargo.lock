@@ -96,7 +96,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "atlas"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "atlas-config",
@@ -104,6 +104,7 @@ dependencies = [
  "atlas-diff",
  "atlas-discovery",
  "atlas-drift",
+ "atlas-episodes",
  "atlas-jobs",
  "atlas-output",
  "atlas-plugins",
@@ -120,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-config"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -129,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-core"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "chrono",
  "serde",
@@ -137,18 +138,20 @@ dependencies = [
 
 [[package]]
 name = "atlas-correlation"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
+ "anyhow",
  "atlas-drift",
  "chrono",
  "hex",
  "serde",
+ "serde_json",
  "sha2",
 ]
 
 [[package]]
 name = "atlas-diff"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "atlas-core",
  "atlas-snapshot",
@@ -158,7 +161,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-discovery"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -170,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-dns"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -179,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-drift"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -194,17 +197,19 @@ dependencies = [
 
 [[package]]
 name = "atlas-episodes"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
+ "anyhow",
  "atlas-correlation",
  "atlas-drift",
  "chrono",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "atlas-http"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -216,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-jobs"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -226,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-output"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -238,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-plugins"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "atlas-drift",
  "serde",
@@ -246,7 +251,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-scheduler"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "atlas-discovery",
@@ -260,7 +265,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-snapshot"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -274,16 +279,19 @@ dependencies = [
 
 [[package]]
 name = "atlas-store"
-version = "0.1.0"
+version = "0.12.0"
 dependencies = [
  "anyhow",
  "atlas-drift",
+ "atlas-episodes",
  "atlas-jobs",
  "atlas-snapshot",
  "chrono",
+ "hex",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

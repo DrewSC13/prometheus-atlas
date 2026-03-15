@@ -1,75 +1,18 @@
-use anyhow::{bail, Result};
-use atlas_drift::{DriftFinding, DriftReport};
+use anyhow::{anyhow, Result};
+use atlas_drift::DriftReport;
+use atlas_episodes::RiskEpisode;
 use atlas_jobs::AtlasJob;
-use atlas_snapshot::{snapshot_file_hash, Snapshot};
-use chrono::Utc;
+use atlas_snapshot::Snapshot;
+use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-pub const SCHEMA_VERSION: i64 = 2;
-
-#[derive(Debug, Clone)]
-pub struct StoredSnapshotMeta {
-    pub snapshot_id: i64,
-    pub target: String,
-    pub timestamp: String,
-    pub path: String,
-    pub file_hash: String,
-    pub snapshot_version: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct StoredDriftRunMeta {
-    pub run_id: i64,
-    pub target: String,
-    pub older_snapshot_path: String,
-    pub newer_snapshot_path: String,
-    pub total_findings: usize,
-    pub total_score: u32,
-    pub overall_severity: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct StoredFindingRecord {
-    pub finding_id: String,
-    pub drift_run_id: i64,
-    pub target: String,
-    pub resource: String,
-    pub category: String,
-    pub severity: String,
-    pub criticality: String,
-    pub state: String,
-    pub score: u32,
-    pub asset_type: String,
-    pub environment: String,
-    pub tags: Vec<String>,
-    pub description: String,
-    pub created_at: String,
-    pub suppressed: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct BaselineRecord {
-    pub resource: String,
-    pub approved: bool,
-    pub expires_at: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct TelemetryRecord {
-    pub name: String,
-    pub target: Option<String>,
-    pub duration_ms: u128,
-    pub metadata_json: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     Json,
     Ndjson,
@@ -84,14 +27,88 @@ impl FromStr for ExportFormat {
             "json" => Ok(Self::Json),
             "ndjson" => Ok(Self::Ndjson),
             "csv" => Ok(Self::Csv),
-            _ => bail!("formato de exportación no soportado"),
+            other => Err(anyhow!("formato no soportado: {other}")),
         }
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredHistoryItem {
+    pub run_id: String,
+    pub target: String,
+    pub older_snapshot_path: String,
+    pub newer_snapshot_path: String,
+    pub policy_path: Option<String>,
+    pub total_findings: usize,
+    pub total_score: u32,
+    pub overall_severity: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredFinding {
+    pub finding_id: String,
+    pub run_id: String,
+    pub target: String,
+    pub severity: String,
+    pub state: String,
+    pub category: String,
+    pub title: String,
+    pub resource: String,
+    pub asset_type: String,
+    pub environment: String,
+    pub criticality: String,
+    pub score: u32,
+    pub tags_json: String,
+    pub description: String,
+    pub is_suppressed: bool,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredSnapshot {
+    pub snapshot_id: String,
+    pub target: String,
+    pub timestamp: String,
+    pub snapshot_version: u32,
+    pub file_hash: String,
+    pub path: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredTelemetryEvent {
+    pub telemetry_id: String,
+    pub name: String,
+    pub target: Option<String>,
+    pub duration_ms: u128,
+    pub metadata_json: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredEpisode {
+    pub episode_id: String,
+    pub target: String,
+    pub title: String,
+    pub kind: String,
+    pub severity: String,
+    pub criticality: String,
+    pub score: u32,
+    pub state: String,
+    pub resource_count: usize,
+    pub resources_json: String,
+    pub cluster_ids_json: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub summary: String,
+    pub explanation_json: String,
+    pub created_at: String,
+}
+
 pub struct AtlasStore {
-    db_path: PathBuf,
     conn: Connection,
+    db_path: PathBuf,
 }
 
 impl AtlasStore {
@@ -102,30 +119,28 @@ impl AtlasStore {
 
         let conn = Connection::open(path)?;
         Ok(Self {
-            db_path: path.to_path_buf(),
             conn,
+            db_path: path.to_path_buf(),
         })
     }
 
     pub fn initialize(&self) -> Result<()> {
         self.conn.execute_batch(
             r#"
-            CREATE TABLE IF NOT EXISTS schema_meta (
-                version INTEGER NOT NULL
-            );
+            PRAGMA foreign_keys = ON;
 
             CREATE TABLE IF NOT EXISTS snapshots (
-                snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id TEXT PRIMARY KEY,
                 target TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
-                path TEXT NOT NULL UNIQUE,
-                file_hash TEXT NOT NULL,
                 snapshot_version INTEGER NOT NULL,
+                file_hash TEXT NOT NULL,
+                path TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS drift_runs (
-                run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT PRIMARY KEY,
                 target TEXT NOT NULL,
                 older_snapshot_path TEXT NOT NULL,
                 newer_snapshot_path TEXT NOT NULL,
@@ -137,26 +152,27 @@ impl AtlasStore {
             );
 
             CREATE TABLE IF NOT EXISTS findings (
-                row_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 finding_id TEXT NOT NULL,
-                drift_run_id INTEGER NOT NULL,
+                run_id TEXT NOT NULL,
                 target TEXT NOT NULL,
-                resource TEXT NOT NULL,
-                category TEXT NOT NULL,
                 severity TEXT NOT NULL,
-                criticality TEXT NOT NULL,
                 state TEXT NOT NULL,
-                score INTEGER NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                resource TEXT NOT NULL,
                 asset_type TEXT NOT NULL,
                 environment TEXT NOT NULL,
+                criticality TEXT NOT NULL,
+                score INTEGER NOT NULL,
                 tags_json TEXT NOT NULL,
                 description TEXT NOT NULL,
-                suppressed INTEGER NOT NULL,
-                created_at TEXT NOT NULL
+                is_suppressed INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (finding_id, run_id)
             );
 
-            CREATE TABLE IF NOT EXISTS telemetry_events (
-                telemetry_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            CREATE TABLE IF NOT EXISTS telemetry (
+                telemetry_id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 target TEXT,
                 duration_ms TEXT NOT NULL,
@@ -167,211 +183,228 @@ impl AtlasStore {
             CREATE TABLE IF NOT EXISTS jobs (
                 job_id TEXT PRIMARY KEY,
                 target TEXT NOT NULL,
-                policy_path TEXT,
                 profile TEXT NOT NULL,
                 interval_seconds INTEGER NOT NULL,
                 enabled INTEGER NOT NULL,
+                policy_path TEXT,
                 last_run_at TEXT,
                 created_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS baseline_entries (
                 resource TEXT PRIMARY KEY,
-                approved INTEGER NOT NULL,
-                expires_at TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS episodes (
+                episode_id TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                title TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                criticality TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                resource_count INTEGER NOT NULL,
+                resources_json TEXT NOT NULL,
+                cluster_ids_json TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                explanation_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
             "#,
         )?;
 
-        let count: i64 = self
-            .conn
-            .query_row("SELECT COUNT(*) FROM schema_meta", [], |row| row.get(0))?;
-
-        if count == 0 {
-            self.conn.execute(
-                "INSERT INTO schema_meta(version) VALUES (?1)",
-                params![SCHEMA_VERSION],
-            )?;
-        } else {
-            self.conn.execute(
-                "UPDATE schema_meta SET version = ?1",
-                params![SCHEMA_VERSION],
-            )?;
-        }
-
         Ok(())
     }
 
-    pub fn current_schema_version(&self) -> Result<i64> {
-        let version =
-            self.conn
-                .query_row("SELECT version FROM schema_meta LIMIT 1", [], |row| {
-                    row.get(0)
-                })?;
-        Ok(version)
+    pub fn db_path(&self) -> &Path {
+        &self.db_path
     }
 
-    pub fn register_snapshot(&self, snapshot_path: &Path, snapshot: &Snapshot) -> Result<i64> {
-        let file_hash = snapshot_file_hash(snapshot_path)?;
-        let created_at = now_rfc3339();
+    pub fn register_snapshot(&self, path: &Path, snapshot: &Snapshot) -> Result<()> {
+        let snapshot_id = format!(
+            "{}:{}",
+            snapshot.target,
+            snapshot
+                .timestamp
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+
+        let file_hash = compute_snapshot_hash(path)?;
 
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO snapshots (
-                target, timestamp, path, file_hash, snapshot_version, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                snapshot_id,
+                target,
+                timestamp,
+                snapshot_version,
+                file_hash,
+                path,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             "#,
             params![
+                snapshot_id,
                 snapshot.target,
                 snapshot.timestamp.to_rfc3339(),
-                snapshot_path.display().to_string(),
-                file_hash,
                 snapshot.snapshot_version,
-                created_at
+                file_hash,
+                path.display().to_string(),
+                Utc::now().to_rfc3339(),
             ],
         )?;
 
-        Ok(self.conn.last_insert_rowid())
+        Ok(())
     }
 
     pub fn register_drift_report(
         &self,
         target: &str,
-        older_snapshot_path: &Path,
-        newer_snapshot_path: &Path,
+        older_snapshot: &Path,
+        newer_snapshot: &Path,
         policy_path: Option<&Path>,
         report: &DriftReport,
-    ) -> Result<i64> {
-        let created_at = now_rfc3339();
+    ) -> Result<()> {
+        let run_id = format!(
+            "{}:{}:{}",
+            target,
+            report.older_timestamp.to_rfc3339(),
+            report.newer_timestamp.to_rfc3339()
+        );
+
+        let now = Utc::now().to_rfc3339();
 
         self.conn.execute(
             r#"
-            INSERT INTO drift_runs (
-                target, older_snapshot_path, newer_snapshot_path, policy_path,
-                total_findings, total_score, overall_severity, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            INSERT OR REPLACE INTO drift_runs (
+                run_id,
+                target,
+                older_snapshot_path,
+                newer_snapshot_path,
+                policy_path,
+                total_findings,
+                total_score,
+                overall_severity,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
             params![
+                run_id,
                 target,
-                older_snapshot_path.display().to_string(),
-                newer_snapshot_path.display().to_string(),
+                older_snapshot.display().to_string(),
+                newer_snapshot.display().to_string(),
                 policy_path.map(|p| p.display().to_string()),
                 report.findings.len(),
                 report.summary.total_score,
                 report.summary.overall_severity.to_string(),
-                created_at
+                now,
             ],
         )?;
 
-        let run_id = self.conn.last_insert_rowid();
-
         for finding in &report.findings {
-            self.insert_finding(run_id, target, finding, false)?;
+            self.insert_finding(&run_id, target, finding, false)?;
         }
 
         for finding in &report.suppressed_findings {
-            self.insert_finding(run_id, target, finding, true)?;
+            self.insert_finding(&run_id, target, finding, true)?;
         }
 
-        Ok(run_id)
+        Ok(())
     }
 
     fn insert_finding(
         &self,
-        run_id: i64,
+        run_id: &str,
         target: &str,
-        finding: &DriftFinding,
-        suppressed: bool,
+        finding: &atlas_drift::DriftFinding,
+        is_suppressed: bool,
     ) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO findings (
-                finding_id, drift_run_id, target, resource, category, severity, criticality,
-                state, score, asset_type, environment, tags_json, description, suppressed, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            INSERT OR REPLACE INTO findings (
+                finding_id,
+                run_id,
+                target,
+                severity,
+                state,
+                category,
+                title,
+                resource,
+                asset_type,
+                environment,
+                criticality,
+                score,
+                tags_json,
+                description,
+                is_suppressed,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
             "#,
             params![
                 finding.finding_id,
                 run_id,
                 target,
-                finding.resource,
-                finding.category,
                 finding.severity.to_string(),
-                finding.criticality.to_string(),
                 finding.state.to_string(),
-                finding.score,
+                finding.category,
+                finding.title,
+                finding.resource,
                 finding.asset_type.to_string(),
                 finding.environment.to_string(),
+                finding.criticality.to_string(),
+                finding.score,
                 serde_json::to_string(&finding.tags)?,
                 finding.description,
-                if suppressed { 1 } else { 0 },
-                now_rfc3339()
+                if is_suppressed { 1 } else { 0 },
+                Utc::now().to_rfc3339(),
             ],
         )?;
 
         Ok(())
     }
 
-    pub fn list_snapshots(&self, target: &str) -> Result<Vec<StoredSnapshotMeta>> {
+    pub fn list_history(&self, target: &str) -> Result<Vec<StoredHistoryItem>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT snapshot_id, target, timestamp, path, file_hash, snapshot_version
-            FROM snapshots
-            WHERE target = ?1
-            ORDER BY timestamp ASC
-            "#,
-        )?;
-
-        let rows = stmt.query_map(params![target], |row| {
-            Ok(StoredSnapshotMeta {
-                snapshot_id: row.get(0)?,
-                target: row.get(1)?,
-                timestamp: row.get(2)?,
-                path: row.get(3)?,
-                file_hash: row.get(4)?,
-                snapshot_version: row.get(5)?,
-            })
-        })?;
-
-        let mut output = Vec::new();
-        for row in rows {
-            output.push(row?);
-        }
-
-        Ok(output)
-    }
-
-    pub fn list_history(&self, target: &str) -> Result<Vec<StoredDriftRunMeta>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT run_id, target, older_snapshot_path, newer_snapshot_path,
-                   total_findings, total_score, overall_severity, created_at
+            SELECT
+                run_id,
+                target,
+                older_snapshot_path,
+                newer_snapshot_path,
+                policy_path,
+                total_findings,
+                total_score,
+                overall_severity,
+                created_at
             FROM drift_runs
             WHERE target = ?1
-            ORDER BY run_id DESC
+            ORDER BY created_at DESC
             "#,
         )?;
 
-        let rows = stmt.query_map(params![target], |row| {
-            Ok(StoredDriftRunMeta {
+        let rows = stmt.query_map([target], |row| {
+            Ok(StoredHistoryItem {
                 run_id: row.get(0)?,
                 target: row.get(1)?,
                 older_snapshot_path: row.get(2)?,
                 newer_snapshot_path: row.get(3)?,
-                total_findings: row.get(4)?,
-                total_score: row.get(5)?,
-                overall_severity: row.get(6)?,
-                created_at: row.get(7)?,
+                policy_path: row.get(4)?,
+                total_findings: row.get(5)?,
+                total_score: row.get(6)?,
+                overall_severity: row.get(7)?,
+                created_at: row.get(8)?,
             })
         })?;
 
-        let mut output = Vec::new();
+        let mut items = Vec::new();
         for row in rows {
-            output.push(row?);
+            items.push(row?);
         }
-
-        Ok(output)
+        Ok(items)
     }
 
     pub fn list_findings(
@@ -379,62 +412,176 @@ impl AtlasStore {
         target: &str,
         severity: Option<&str>,
         state: Option<&str>,
-    ) -> Result<Vec<StoredFindingRecord>> {
-        let mut all = self.list_findings_internal(target)?;
-
-        if let Some(severity) = severity {
-            let severity_lower = severity.to_ascii_lowercase();
-            all.retain(|f| f.severity.eq_ignore_ascii_case(&severity_lower));
-        }
-
-        if let Some(state) = state {
-            let state_lower = state.to_ascii_lowercase();
-            all.retain(|f| f.state.eq_ignore_ascii_case(&state_lower));
-        }
-
-        Ok(all)
-    }
-
-    fn list_findings_internal(&self, target: &str) -> Result<Vec<StoredFindingRecord>> {
+    ) -> Result<Vec<StoredFinding>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT finding_id, drift_run_id, target, resource, category, severity, criticality,
-                   state, score, asset_type, environment, tags_json, description, created_at, suppressed
+            SELECT
+                finding_id,
+                run_id,
+                target,
+                severity,
+                state,
+                category,
+                title,
+                resource,
+                asset_type,
+                environment,
+                criticality,
+                score,
+                tags_json,
+                description,
+                is_suppressed,
+                created_at
             FROM findings
             WHERE target = ?1
-            ORDER BY row_id DESC
+            ORDER BY score DESC, created_at DESC
             "#,
         )?;
 
-        let rows = stmt.query_map(params![target], |row| {
-            let tags_json: String = row.get(11)?;
-            let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
-
-            Ok(StoredFindingRecord {
+        let rows = stmt.query_map([target], |row| {
+            Ok(StoredFinding {
                 finding_id: row.get(0)?,
-                drift_run_id: row.get(1)?,
+                run_id: row.get(1)?,
                 target: row.get(2)?,
-                resource: row.get(3)?,
-                category: row.get(4)?,
-                severity: row.get(5)?,
-                criticality: row.get(6)?,
-                state: row.get(7)?,
-                score: row.get(8)?,
-                asset_type: row.get(9)?,
-                environment: row.get(10)?,
-                tags,
-                description: row.get(12)?,
-                created_at: row.get(13)?,
-                suppressed: row.get::<_, i64>(14)? == 1,
+                severity: row.get(3)?,
+                state: row.get(4)?,
+                category: row.get(5)?,
+                title: row.get(6)?,
+                resource: row.get(7)?,
+                asset_type: row.get(8)?,
+                environment: row.get(9)?,
+                criticality: row.get(10)?,
+                score: row.get(11)?,
+                tags_json: row.get(12)?,
+                description: row.get(13)?,
+                is_suppressed: {
+                    let value: i64 = row.get(14)?;
+                    value != 0
+                },
+                created_at: row.get(15)?,
             })
         })?;
 
-        let mut output = Vec::new();
+        let mut findings = Vec::new();
         for row in rows {
-            output.push(row?);
+            findings.push(row?);
         }
 
-        Ok(output)
+        if let Some(severity_filter) = severity {
+            findings.retain(|f| f.severity.eq_ignore_ascii_case(severity_filter));
+        }
+
+        if let Some(state_filter) = state {
+            findings.retain(|f| f.state.eq_ignore_ascii_case(state_filter));
+        }
+
+        Ok(findings)
+    }
+
+    pub fn list_snapshots(&self, target: &str) -> Result<Vec<StoredSnapshot>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                snapshot_id,
+                target,
+                timestamp,
+                snapshot_version,
+                file_hash,
+                path,
+                created_at
+            FROM snapshots
+            WHERE target = ?1
+            ORDER BY timestamp DESC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([target], |row| {
+            Ok(StoredSnapshot {
+                snapshot_id: row.get(0)?,
+                target: row.get(1)?,
+                timestamp: row.get(2)?,
+                snapshot_version: row.get(3)?,
+                file_hash: row.get(4)?,
+                path: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+
+        let mut snapshots = Vec::new();
+        for row in rows {
+            snapshots.push(row?);
+        }
+        Ok(snapshots)
+    }
+
+    pub fn record_telemetry(
+        &self,
+        name: &str,
+        target: Option<&str>,
+        duration_ms: u128,
+        metadata: &Value,
+    ) -> Result<()> {
+        let telemetry_id = format!("{}:{}", name, Utc::now().timestamp_nanos_opt().unwrap_or(0));
+
+        self.conn.execute(
+            r#"
+            INSERT INTO telemetry (
+                telemetry_id,
+                name,
+                target,
+                duration_ms,
+                metadata_json,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                telemetry_id,
+                name,
+                target,
+                duration_ms.to_string(),
+                serde_json::to_string(metadata)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn list_telemetry(&self, limit: usize) -> Result<Vec<StoredTelemetryEvent>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                telemetry_id,
+                name,
+                target,
+                duration_ms,
+                metadata_json,
+                created_at
+            FROM telemetry
+            ORDER BY created_at DESC
+            LIMIT ?1
+            "#,
+        )?;
+
+        let rows = stmt.query_map([limit as i64], |row| {
+            let duration_str: String = row.get(3)?;
+            let duration_ms = duration_str.parse::<u128>().unwrap_or(0);
+
+            Ok(StoredTelemetryEvent {
+                telemetry_id: row.get(0)?,
+                name: row.get(1)?,
+                target: row.get(2)?,
+                duration_ms,
+                metadata_json: row.get(4)?,
+                created_at: row.get(5)?,
+            })
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
     }
 
     pub fn export_findings(
@@ -447,196 +594,85 @@ impl AtlasStore {
     ) -> Result<()> {
         let findings = self.list_findings(target, severity, state)?;
 
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
         match format {
             ExportFormat::Json => {
-                let payload = serde_json::to_string_pretty(
-                    &findings
-                        .iter()
-                        .map(|f| {
-                            serde_json::json!({
-                                "finding_id": f.finding_id,
-                                "drift_run_id": f.drift_run_id,
-                                "target": f.target,
-                                "resource": f.resource,
-                                "category": f.category,
-                                "severity": f.severity,
-                                "criticality": f.criticality,
-                                "state": f.state,
-                                "score": f.score,
-                                "asset_type": f.asset_type,
-                                "environment": f.environment,
-                                "tags": f.tags,
-                                "description": f.description,
-                                "created_at": f.created_at,
-                                "suppressed": f.suppressed
-                            })
-                        })
-                        .collect::<Vec<_>>(),
-                )?;
-                fs::write(output, payload)?;
+                let content = serde_json::to_string_pretty(&findings)?;
+                fs::write(output, content)?;
             }
             ExportFormat::Ndjson => {
-                let mut content = String::new();
-                for f in &findings {
-                    let line = serde_json::to_string(&serde_json::json!({
-                        "finding_id": f.finding_id,
-                        "drift_run_id": f.drift_run_id,
-                        "target": f.target,
-                        "resource": f.resource,
-                        "category": f.category,
-                        "severity": f.severity,
-                        "criticality": f.criticality,
-                        "state": f.state,
-                        "score": f.score,
-                        "asset_type": f.asset_type,
-                        "environment": f.environment,
-                        "tags": f.tags,
-                        "description": f.description,
-                        "created_at": f.created_at,
-                        "suppressed": f.suppressed
-                    }))?;
-                    content.push_str(&line);
-                    content.push('\n');
+                let mut out = String::new();
+                for finding in findings {
+                    out.push_str(&serde_json::to_string(&finding)?);
+                    out.push('\n');
                 }
-                fs::write(output, content)?;
+                fs::write(output, out)?;
             }
             ExportFormat::Csv => {
-                let mut content = String::from(
-                    "finding_id,drift_run_id,target,resource,category,severity,criticality,state,score,asset_type,environment,tags,description,created_at,suppressed\n",
+                let mut out = String::from(
+                    "finding_id,run_id,target,severity,state,category,title,resource,asset_type,environment,criticality,score,is_suppressed,created_at\n",
                 );
-
-                for f in &findings {
-                    content.push_str(&format!(
-                        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
-                        csv_escape(&f.finding_id),
-                        f.drift_run_id,
-                        csv_escape(&f.target),
-                        csv_escape(&f.resource),
-                        csv_escape(&f.category),
-                        csv_escape(&f.severity),
-                        csv_escape(&f.criticality),
-                        csv_escape(&f.state),
-                        f.score,
-                        csv_escape(&f.asset_type),
-                        csv_escape(&f.environment),
-                        csv_escape(&f.tags.join("|")),
-                        csv_escape(&f.description),
-                        csv_escape(&f.created_at),
-                        f.suppressed
+                for finding in findings {
+                    out.push_str(&format!(
+                        "\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",\"{}\",{},\"{}\",\"{}\"\n",
+                        escape_csv(&finding.finding_id),
+                        escape_csv(&finding.run_id),
+                        escape_csv(&finding.target),
+                        escape_csv(&finding.severity),
+                        escape_csv(&finding.state),
+                        escape_csv(&finding.category),
+                        escape_csv(&finding.title),
+                        escape_csv(&finding.resource),
+                        escape_csv(&finding.asset_type),
+                        escape_csv(&finding.environment),
+                        escape_csv(&finding.criticality),
+                        finding.score,
+                        if finding.is_suppressed { "true" } else { "false" },
+                        escape_csv(&finding.created_at),
                     ));
                 }
-
-                fs::write(output, content)?;
+                fs::write(output, out)?;
             }
         }
 
-        Ok(())
-    }
-
-    pub fn record_telemetry(
-        &self,
-        name: &str,
-        target: Option<&str>,
-        duration_ms: u128,
-        metadata: &Value,
-    ) -> Result<()> {
-        self.conn.execute(
-            r#"
-            INSERT INTO telemetry_events (name, target, duration_ms, metadata_json, created_at)
-            VALUES (?1, ?2, ?3, ?4, ?5)
-            "#,
-            params![
-                name,
-                target,
-                duration_ms.to_string(),
-                serde_json::to_string(metadata)?,
-                now_rfc3339()
-            ],
-        )?;
-
-        Ok(())
-    }
-
-    pub fn list_telemetry(&self, limit: usize) -> Result<Vec<TelemetryRecord>> {
-        let mut stmt = self.conn.prepare(
-            r#"
-            SELECT name, target, duration_ms, metadata_json, created_at
-            FROM telemetry_events
-            ORDER BY telemetry_id DESC
-            LIMIT ?1
-            "#,
-        )?;
-
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            let duration_ms_str: String = row.get(2)?;
-            let duration_ms = duration_ms_str.parse::<u128>().unwrap_or_default();
-
-            Ok(TelemetryRecord {
-                name: row.get(0)?,
-                target: row.get(1)?,
-                duration_ms,
-                metadata_json: row.get(3)?,
-                created_at: row.get(4)?,
-            })
-        })?;
-
-        let mut output = Vec::new();
-        for row in rows {
-            output.push(row?);
-        }
-
-        Ok(output)
-    }
-
-    pub fn create_job(&self, job: &AtlasJob) -> Result<()> {
-        self.conn.execute(
-            r#"
-            INSERT INTO jobs (
-                job_id, target, policy_path, profile, interval_seconds, enabled, last_run_at, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            "#,
-            params![
-                job.job_id,
-                job.target,
-                job.policy_path,
-                job.profile,
-                job.interval_seconds,
-                if job.enabled { 1 } else { 0 },
-                job.last_run_at
-                    .map(|d: chrono::DateTime<chrono::Utc>| d.to_rfc3339()),
-                job.created_at.to_rfc3339()
-            ],
-        )?;
         Ok(())
     }
 
     pub fn list_jobs(&self) -> Result<Vec<AtlasJob>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT job_id, target, policy_path, profile, interval_seconds, enabled, last_run_at, created_at
+            SELECT
+                job_id,
+                target,
+                profile,
+                interval_seconds,
+                enabled,
+                policy_path,
+                last_run_at,
+                created_at
             FROM jobs
-            ORDER BY created_at ASC
+            ORDER BY created_at DESC
             "#,
         )?;
 
         let rows = stmt.query_map([], |row| {
+            let enabled_value: i64 = row.get(4)?;
+            let policy_path: Option<String> = row.get(5)?;
             let last_run_at: Option<String> = row.get(6)?;
             let created_at: String = row.get(7)?;
 
             Ok(AtlasJob {
                 job_id: row.get(0)?,
                 target: row.get(1)?,
-                policy_path: row.get(2)?,
-                profile: row.get(3)?,
-                interval_seconds: row.get(4)?,
-                enabled: row.get::<_, i64>(5)? == 1,
-                last_run_at: last_run_at
-                    .as_deref()
-                    .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
-                    .map(|dt| dt.with_timezone(&Utc)),
-                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)
-                    .map(|dt| dt.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now()),
+                profile: row.get(2)?,
+                interval_seconds: row.get(3)?,
+                enabled: enabled_value != 0,
+                policy_path,
+                last_run_at: parse_optional_datetime(last_run_at),
+                created_at: parse_datetime(created_at)?,
             })
         })?;
 
@@ -644,82 +680,225 @@ impl AtlasStore {
         for row in rows {
             jobs.push(row?);
         }
-
         Ok(jobs)
     }
 
-    pub fn set_job_enabled(&self, job_id: &str, enabled: bool) -> Result<()> {
+    pub fn insert_job(&self, job: &AtlasJob) -> Result<()> {
         self.conn.execute(
-            "UPDATE jobs SET enabled = ?1 WHERE job_id = ?2",
-            params![if enabled { 1 } else { 0 }, job_id],
+            r#"
+            INSERT OR REPLACE INTO jobs (
+                job_id,
+                target,
+                profile,
+                interval_seconds,
+                enabled,
+                policy_path,
+                last_run_at,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                job.job_id,
+                job.target,
+                job.profile,
+                job.interval_seconds,
+                if job.enabled { 1 } else { 0 },
+                job.policy_path,
+                job.last_run_at.map(|d| d.to_rfc3339()),
+                job.created_at.to_rfc3339(),
+            ],
         )?;
+
         Ok(())
     }
 
     pub fn touch_job_run(&self, job_id: &str) -> Result<()> {
         self.conn.execute(
-            "UPDATE jobs SET last_run_at = ?1 WHERE job_id = ?2",
-            params![now_rfc3339(), job_id],
+            r#"
+            UPDATE jobs
+            SET last_run_at = ?1
+            WHERE job_id = ?2
+            "#,
+            params![Utc::now().to_rfc3339(), job_id],
         )?;
+
         Ok(())
     }
 
-    pub fn approve_baseline(&self, resource: &str, expires_at: Option<&str>) -> Result<()> {
+    pub fn baseline_approve(&self, resource: &str) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT INTO baseline_entries(resource, approved, expires_at, created_at)
-            VALUES (?1, 1, ?2, ?3)
-            ON CONFLICT(resource) DO UPDATE SET approved = 1, expires_at = excluded.expires_at
+            INSERT OR REPLACE INTO baseline_entries (resource, created_at)
+            VALUES (?1, ?2)
             "#,
-            params![resource, expires_at, now_rfc3339()],
+            params![resource, Utc::now().to_rfc3339()],
         )?;
+
         Ok(())
     }
 
-    pub fn revoke_baseline(&self, resource: &str) -> Result<()> {
+    pub fn baseline_revoke(&self, resource: &str) -> Result<()> {
         self.conn.execute(
-            "DELETE FROM baseline_entries WHERE resource = ?1",
+            r#"
+            DELETE FROM baseline_entries
+            WHERE resource = ?1
+            "#,
             params![resource],
         )?;
+
         Ok(())
     }
 
-    pub fn list_baseline(&self) -> Result<Vec<BaselineRecord>> {
+    pub fn baseline_list(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             r#"
-            SELECT resource, approved, expires_at, created_at
+            SELECT resource
             FROM baseline_entries
             ORDER BY resource ASC
             "#,
         )?;
 
-        let rows = stmt.query_map([], |row| {
-            Ok(BaselineRecord {
-                resource: row.get(0)?,
-                approved: row.get::<_, i64>(1)? == 1,
-                expires_at: row.get(2)?,
-                created_at: row.get(3)?,
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+
+        let mut resources = Vec::new();
+        for row in rows {
+            resources.push(row?);
+        }
+
+        Ok(resources)
+    }
+
+    pub fn store_episodes(&self, target: &str, episodes: &[RiskEpisode]) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        for episode in episodes {
+            self.conn.execute(
+                r#"
+                INSERT OR REPLACE INTO episodes (
+                    episode_id,
+                    target,
+                    title,
+                    kind,
+                    severity,
+                    criticality,
+                    score,
+                    state,
+                    resource_count,
+                    resources_json,
+                    cluster_ids_json,
+                    started_at,
+                    ended_at,
+                    summary,
+                    explanation_json,
+                    created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                "#,
+                params![
+                    episode.episode_id,
+                    target,
+                    episode.title,
+                    episode.kind.to_string(),
+                    episode.severity.to_string(),
+                    episode.criticality.to_string(),
+                    episode.score,
+                    episode.state.to_string(),
+                    episode.resource_count,
+                    serde_json::to_string(&episode.resources)?,
+                    serde_json::to_string(&episode.cluster_ids)?,
+                    episode.started_at.to_rfc3339(),
+                    episode.ended_at.to_rfc3339(),
+                    episode.summary,
+                    serde_json::to_string(&episode.explanation)?,
+                    now,
+                ],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn list_episodes(&self, target: &str) -> Result<Vec<StoredEpisode>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                episode_id,
+                target,
+                title,
+                kind,
+                severity,
+                criticality,
+                score,
+                state,
+                resource_count,
+                resources_json,
+                cluster_ids_json,
+                started_at,
+                ended_at,
+                summary,
+                explanation_json,
+                created_at
+            FROM episodes
+            WHERE target = ?1
+            ORDER BY score DESC, started_at DESC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([target], |row| {
+            Ok(StoredEpisode {
+                episode_id: row.get(0)?,
+                target: row.get(1)?,
+                title: row.get(2)?,
+                kind: row.get(3)?,
+                severity: row.get(4)?,
+                criticality: row.get(5)?,
+                score: row.get(6)?,
+                state: row.get(7)?,
+                resource_count: row.get(8)?,
+                resources_json: row.get(9)?,
+                cluster_ids_json: row.get(10)?,
+                started_at: row.get(11)?,
+                ended_at: row.get(12)?,
+                summary: row.get(13)?,
+                explanation_json: row.get(14)?,
+                created_at: row.get(15)?,
             })
         })?;
 
-        let mut records = Vec::new();
+        let mut episodes = Vec::new();
         for row in rows {
-            records.push(row?);
+            episodes.push(row?);
         }
 
-        Ok(records)
-    }
-
-    pub fn db_path(&self) -> &Path {
-        &self.db_path
+        Ok(episodes)
     }
 }
 
-fn now_rfc3339() -> String {
-    Utc::now().to_rfc3339()
+fn compute_snapshot_hash(path: &Path) -> Result<String> {
+    let content = fs::read(path)?;
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    let digest = hasher.finalize();
+    Ok(hex::encode(digest))
 }
 
-fn csv_escape(input: &str) -> String {
-    let escaped = input.replace('"', "\"\"");
-    format!("\"{escaped}\"")
+fn parse_datetime(value: String) -> rusqlite::Result<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(&value)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(
+                value.len(),
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
+        })
+}
+
+fn parse_optional_datetime(value: Option<String>) -> Option<DateTime<Utc>> {
+    value
+        .and_then(|v| DateTime::parse_from_rfc3339(&v).ok())
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+fn escape_csv(input: &str) -> String {
+    input.replace('"', "\"\"")
 }

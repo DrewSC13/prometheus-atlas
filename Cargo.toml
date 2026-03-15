@@ -1,9 +1,6 @@
 [workspace]
-resolver = "2"
-
 members = [
     "apps/scanner",
-
     "crates/atlas-config",
     "crates/atlas-core",
     "crates/atlas-correlation",
@@ -18,46 +15,31 @@ members = [
     "crates/atlas-plugins",
     "crates/atlas-scheduler",
     "crates/atlas-snapshot",
-    "crates/atlas-store"
+    "crates/atlas-store",
 ]
+resolver = "2"
 
 [workspace.package]
+version = "0.12.0"
 edition = "2021"
-version = "0.1.0"
 license = "MIT"
-authors = ["Prometheus Atlas"]
+authors = ["Prometheus Atlas Contributors"]
 repository = "https://github.com/DrewSC13/prometheus-atlas"
 
 [workspace.dependencies]
-
 anyhow = "1"
-
 chrono = { version = "0.4", features = ["serde"] }
-
 clap = { version = "4", features = ["derive"] }
-
 futures = "0.3"
-
 hex = "0.4"
-
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
 rusqlite = { version = "0.30", features = ["bundled"] }
-
 serde = { version = "1", features = ["derive"] }
-
 serde_json = "1"
-
 sha2 = "0.10"
-
 tokio = { version = "1", features = ["full"] }
-
 toml = "0.8"
-
 tracing = "0.1"
-
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
-
 uuid = { version = "1", features = ["v4", "serde"] }
-
-walkdir = "2.5"
+walkdir = "2"
