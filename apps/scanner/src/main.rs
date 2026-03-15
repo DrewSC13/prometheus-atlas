@@ -217,6 +217,13 @@ fn print_human_drift_report(report: &atlas_drift::DriftReport) {
     );
 
     println!();
+    println!("Estados de hallazgo:");
+    println!("  - New: {}", report.summary.states.new);
+    println!("  - Recurring: {}", report.summary.states.recurring);
+    println!("  - Persistent: {}", report.summary.states.persistent);
+    println!("  - Suppressed: {}", report.summary.states.suppressed);
+
+    println!();
     println!("Distribución por tipo de activo:");
     println!("  - IPs: {}", report.summary.asset_types.ips);
     println!("  - Subdominios: {}", report.summary.asset_types.subdomains);
@@ -247,13 +254,14 @@ fn print_human_drift_report(report: &atlas_drift::DriftReport) {
 
         for finding in &group.findings {
             println!(
-                "      [{}] {} | categoría={} | tipo={} | entorno={} | criticidad={} | score={}",
+                "      [{}] {} | categoría={} | tipo={} | entorno={} | criticidad={} | estado={} | score={}",
                 finding.severity,
                 finding.title,
                 finding.category,
                 finding.asset_type,
                 finding.environment,
                 finding.criticality,
+                finding.state,
                 finding.score
             );
 
@@ -289,6 +297,14 @@ fn print_human_timeline_report(report: &atlas_drift::TimelineReport) {
     println!(
         "  - Hallazgos sobre activos críticos: {}",
         report.executive.critical_findings
+    );
+    println!(
+        "  - Hallazgos recurrentes: {}",
+        report.executive.recurring_findings
+    );
+    println!(
+        "  - Hallazgos persistentes: {}",
+        report.executive.persistent_findings
     );
 
     println!();

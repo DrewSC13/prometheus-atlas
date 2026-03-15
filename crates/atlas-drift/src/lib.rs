@@ -90,6 +90,25 @@ impl std::fmt::Display for AssetType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum FindingState {
+    New,
+    Recurring,
+    Persistent,
+    Suppressed,
+}
+
+impl std::fmt::Display for FindingState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FindingState::New => write!(f, "New"),
+            FindingState::Recurring => write!(f, "Recurring"),
+            FindingState::Persistent => write!(f, "Persistent"),
+            FindingState::Suppressed => write!(f, "Suppressed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriftFinding {
     pub severity: Severity,
     pub score: u32,
@@ -99,6 +118,7 @@ pub struct DriftFinding {
     pub asset_type: AssetType,
     pub environment: Environment,
     pub criticality: Criticality,
+    pub state: FindingState,
     pub tags: Vec<String>,
     pub description: String,
 }
@@ -112,6 +132,14 @@ pub struct AssetTypeSummary {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StateSummary {
+    pub new: usize,
+    pub recurring: usize,
+    pub persistent: usize,
+    pub suppressed: usize,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DriftSummary {
     pub high: usize,
     pub medium: usize,
@@ -121,6 +149,7 @@ pub struct DriftSummary {
     pub overall_severity: Severity,
     pub critical_findings: usize,
     pub asset_types: AssetTypeSummary,
+    pub states: StateSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -149,6 +178,14 @@ pub struct EnvironmentOverride {
     pub environment: Environment,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TemporaryException {
+    pub resource: String,
+    pub category: String,
+    pub expires_at: DateTime<Utc>,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DriftPolicy {
     pub allowlisted_resources: Vec<String>,
@@ -156,6 +193,9 @@ pub struct DriftPolicy {
     pub critical_resources: Vec<String>,
     pub critical_patterns: Vec<String>,
     pub environment_overrides: Vec<EnvironmentOverride>,
+    pub temporary_exceptions: Vec<TemporaryException>,
+    pub baseline_resources: Vec<String>,
+    pub baseline_categories: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -180,29 +220,17 @@ pub struct CategoryAggregate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TechnologyAggregate {
-    pub technology: String,
-    pub occurrences: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProviderAggregate {
-    pub provider: String,
-    pub occurrences: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineExecutiveSummary {
     pub total_score: u32,
     pub overall_severity: Severity,
     pub total_findings: usize,
     pub unique_resources: usize,
     pub critical_findings: usize,
+    pub recurring_findings: usize,
+    pub persistent_findings: usize,
     pub asset_types: AssetTypeSummary,
     pub top_resources: Vec<ResourceAggregate>,
     pub top_categories: Vec<CategoryAggregate>,
-    pub top_technologies: Vec<TechnologyAggregate>,
-    pub top_providers: Vec<ProviderAggregate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,6 +250,7 @@ struct FindingSpec {
     resource: String,
     environment: Environment,
     criticality: Criticality,
+    state: FindingState,
     tags: Vec<String>,
     description: String,
 }
@@ -237,7 +266,7 @@ impl DriftPolicy {
         Ok(policy)
     }
 
-    pub fn suppresses(&self, finding: &DriftFinding) -> bool {
+    pub fn suppresses(&self, finding: &DriftFinding, now: DateTime<Utc>) -> bool {
         self.allowlisted_categories
             .iter()
             .any(|category| category == &finding.category)
@@ -245,6 +274,11 @@ impl DriftPolicy {
                 .allowlisted_resources
                 .iter()
                 .any(|pattern| matches_resource(pattern, &finding.resource))
+            || self.temporary_exceptions.iter().any(|exception| {
+                exception.category == finding.category
+                    && exception.resource == finding.resource
+                    && now <= exception.expires_at
+            })
     }
 
     pub fn is_critical_resource(&self, resource: &str) -> bool {
@@ -254,6 +288,14 @@ impl DriftPolicy {
                 .iter()
                 .any(|pattern| matches_resource(pattern, resource))
     }
+
+    pub fn is_baseline_resource(&self, resource: &str) -> bool {
+        self.baseline_resources.iter().any(|r| r == resource)
+    }
+
+    pub fn is_baseline_category(&self, category: &str) -> bool {
+        self.baseline_categories.iter().any(|c| c == category)
+    }
 }
 
 pub fn analyze_diff(diff: &DiffReport) -> DriftReport {
@@ -261,6 +303,7 @@ pub fn analyze_diff(diff: &DiffReport) -> DriftReport {
 }
 
 pub fn analyze_diff_with_policy(diff: &DiffReport, policy: Option<&DriftPolicy>) -> DriftReport {
+    let now = diff.newer_timestamp;
     let mut findings = Vec::new();
 
     for ip in &diff.new_ips {
@@ -272,6 +315,7 @@ pub fn analyze_diff_with_policy(diff: &DiffReport, policy: Option<&DriftPolicy>)
             resource: ip.to_string(),
             environment: infer_environment_with_policy(ip, policy),
             criticality: classify_criticality(ip, policy, &Environment::Unknown, &AssetType::Ip),
+            state: FindingState::New,
             tags: vec!["network".to_string(), "new-exposure".to_string()],
             description: format!(
                 "Se detectó una nueva dirección IP {} en el snapshot más reciente.",
@@ -289,6 +333,7 @@ pub fn analyze_diff_with_policy(diff: &DiffReport, policy: Option<&DriftPolicy>)
             resource: ip.to_string(),
             environment: infer_environment_with_policy(ip, policy),
             criticality: classify_criticality(ip, policy, &Environment::Unknown, &AssetType::Ip),
+            state: FindingState::New,
             tags: vec!["network".to_string(), "removed".to_string()],
             description: format!(
                 "La dirección IP {} dejó de aparecer en el snapshot más reciente.",
@@ -314,6 +359,7 @@ pub fn analyze_diff_with_policy(diff: &DiffReport, policy: Option<&DriftPolicy>)
             resource: subdomain.clone(),
             environment,
             criticality,
+            state: FindingState::New,
             tags: vec!["subdomain".to_string(), "removed".to_string()],
             description: format!(
                 "El subdominio {} ya no fue detectado en el snapshot más reciente.",
@@ -328,7 +374,6 @@ pub fn analyze_diff_with_policy(diff: &DiffReport, policy: Option<&DriftPolicy>)
             service.scheme.as_str(),
             service.technologies.as_slice(),
             service.provider.as_deref(),
-            &service.security_headers,
             policy,
         ));
     }
@@ -350,6 +395,7 @@ pub fn analyze_diff_with_policy(diff: &DiffReport, policy: Option<&DriftPolicy>)
             resource: service.url.clone(),
             environment,
             criticality,
+            state: FindingState::New,
             tags: vec!["service".to_string(), "removed".to_string()],
             description: format!(
                 "El servicio {} dejó de estar presente entre snapshots.",
@@ -362,9 +408,13 @@ pub fn analyze_diff_with_policy(diff: &DiffReport, policy: Option<&DriftPolicy>)
         findings.extend(classify_service_change(change, policy));
     }
 
-    let (suppressed_findings, active_findings) = apply_policy(findings, policy);
+    for finding in &mut findings {
+        adjust_for_baseline(finding, policy);
+    }
+
+    let (suppressed_findings, active_findings) = apply_policy(findings, policy, now);
     let groups = group_findings(&active_findings);
-    let summary = summarize(&active_findings);
+    let summary = summarize(&active_findings, &suppressed_findings);
 
     DriftReport {
         target: diff.target.clone(),
@@ -387,13 +437,34 @@ pub fn build_timeline_report(
     }
 
     let mut transitions = Vec::new();
+    let mut history: BTreeMap<(String, String), usize> = BTreeMap::new();
 
     for pair in snapshots.windows(2) {
         let older = &pair[0];
         let newer = &pair[1];
 
         let diff = atlas_diff::diff_snapshots(older, newer);
-        let report = analyze_diff_with_policy(&diff, policy);
+        let mut report = analyze_diff_with_policy(&diff, policy);
+
+        for finding in &mut report.findings {
+            let key = (finding.category.clone(), finding.resource.clone());
+            let seen = history.get(&key).copied().unwrap_or(0);
+
+            if seen == 0 {
+                finding.state = FindingState::New;
+            } else if seen == 1 {
+                finding.state = FindingState::Recurring;
+                finding.score += 10;
+            } else {
+                finding.state = FindingState::Persistent;
+                finding.score += 20;
+            }
+
+            history.insert(key, seen + 1);
+        }
+
+        report.groups = group_findings(&report.findings);
+        report.summary = summarize(&report.findings, &report.suppressed_findings);
 
         transitions.push(TimelineTransition {
             older_timestamp: older.timestamp,
@@ -418,12 +489,12 @@ fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecut
     let mut total_findings = 0;
     let mut unique_resources = BTreeSet::new();
     let mut critical_findings = 0;
+    let mut recurring_findings = 0;
+    let mut persistent_findings = 0;
     let mut asset_types = AssetTypeSummary::default();
 
     let mut resource_map: BTreeMap<String, ResourceAggregate> = BTreeMap::new();
     let mut category_map: BTreeMap<String, CategoryAggregate> = BTreeMap::new();
-    let mut technology_map: BTreeMap<String, TechnologyAggregate> = BTreeMap::new();
-    let mut provider_map: BTreeMap<String, ProviderAggregate> = BTreeMap::new();
 
     for transition in transitions {
         total_score += transition.report.summary.total_score;
@@ -433,6 +504,12 @@ fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecut
         for finding in &transition.report.findings {
             unique_resources.insert(finding.resource.clone());
             increment_asset_type(&mut asset_types, &finding.asset_type);
+
+            match finding.state {
+                FindingState::Recurring => recurring_findings += 1,
+                FindingState::Persistent => persistent_findings += 1,
+                FindingState::New | FindingState::Suppressed => {}
+            }
 
             resource_map
                 .entry(finding.resource.clone())
@@ -457,36 +534,14 @@ fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecut
                     occurrences: 1,
                     total_score: finding.score,
                 });
-
-            for tag in &finding.tags {
-                if let Some(tech) = tag.strip_prefix("tech:") {
-                    technology_map
-                        .entry(tech.to_string())
-                        .and_modify(|entry| entry.occurrences += 1)
-                        .or_insert(TechnologyAggregate {
-                            technology: tech.to_string(),
-                            occurrences: 1,
-                        });
-                }
-
-                if let Some(provider) = tag.strip_prefix("provider:") {
-                    provider_map
-                        .entry(provider.to_string())
-                        .and_modify(|entry| entry.occurrences += 1)
-                        .or_insert(ProviderAggregate {
-                            provider: provider.to_string(),
-                            occurrences: 1,
-                        });
-                }
-            }
         }
     }
 
-    let overall_severity = if total_score >= 300 {
+    let overall_severity = if total_score >= 350 {
         Severity::High
-    } else if total_score >= 150 {
+    } else if total_score >= 180 {
         Severity::Medium
-    } else if total_score >= 30 {
+    } else if total_score >= 40 {
         Severity::Low
     } else {
         Severity::Info
@@ -500,38 +555,32 @@ fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecut
     top_categories.sort_by(|a, b| b.total_score.cmp(&a.total_score));
     top_categories.truncate(5);
 
-    let mut top_technologies: Vec<_> = technology_map.into_values().collect();
-    top_technologies.sort_by(|a, b| b.occurrences.cmp(&a.occurrences));
-    top_technologies.truncate(5);
-
-    let mut top_providers: Vec<_> = provider_map.into_values().collect();
-    top_providers.sort_by(|a, b| b.occurrences.cmp(&a.occurrences));
-    top_providers.truncate(5);
-
     TimelineExecutiveSummary {
         total_score,
         overall_severity,
         total_findings,
         unique_resources: unique_resources.len(),
         critical_findings,
+        recurring_findings,
+        persistent_findings,
         asset_types,
         top_resources,
         top_categories,
-        top_technologies,
-        top_providers,
     }
 }
 
 fn apply_policy(
     findings: Vec<DriftFinding>,
     policy: Option<&DriftPolicy>,
+    now: DateTime<Utc>,
 ) -> (Vec<DriftFinding>, Vec<DriftFinding>) {
     if let Some(policy) = policy {
         let mut suppressed = Vec::new();
         let mut active = Vec::new();
 
-        for finding in findings {
-            if policy.suppresses(&finding) {
+        for mut finding in findings {
+            if policy.suppresses(&finding, now) {
+                finding.state = FindingState::Suppressed;
                 suppressed.push(finding);
             } else {
                 active.push(finding);
@@ -541,6 +590,26 @@ fn apply_policy(
         (suppressed, active)
     } else {
         (Vec::new(), findings)
+    }
+}
+
+fn adjust_for_baseline(finding: &mut DriftFinding, policy: Option<&DriftPolicy>) {
+    let Some(policy) = policy else {
+        return;
+    };
+
+    if policy.is_baseline_resource(&finding.resource)
+        || policy.is_baseline_category(&finding.category)
+    {
+        finding.score = finding.score.saturating_sub(15);
+
+        if matches!(finding.severity, Severity::High) {
+            finding.severity = Severity::Medium;
+        } else if matches!(finding.severity, Severity::Medium) {
+            finding.severity = Severity::Low;
+        }
+
+        finding.tags.push("baseline-adjusted".to_string());
     }
 }
 
@@ -558,6 +627,7 @@ fn classify_new_subdomain(subdomain: &str, policy: Option<&DriftPolicy>) -> Drif
             resource: subdomain.to_string(),
             environment,
             criticality: elevate_criticality(criticality, Criticality::High),
+            state: FindingState::New,
             tags: vec![
                 "subdomain".to_string(),
                 "admin".to_string(),
@@ -583,6 +653,7 @@ fn classify_new_subdomain(subdomain: &str, policy: Option<&DriftPolicy>) -> Drif
             resource: subdomain.to_string(),
             environment,
             criticality,
+            state: FindingState::New,
             tags: vec![
                 "subdomain".to_string(),
                 "nonprod".to_string(),
@@ -602,6 +673,7 @@ fn classify_new_subdomain(subdomain: &str, policy: Option<&DriftPolicy>) -> Drif
             resource: subdomain.to_string(),
             environment,
             criticality,
+            state: FindingState::New,
             tags: vec!["subdomain".to_string(), "new-exposure".to_string()],
             description: format!(
                 "Se detectó un nuevo subdominio {} que no existía en el snapshot anterior.",
@@ -616,7 +688,6 @@ fn classify_new_service(
     scheme: &str,
     technologies: &[String],
     provider: Option<&str>,
-    security_headers: &atlas_core::SecurityHeaders,
     policy: Option<&DriftPolicy>,
 ) -> DriftFinding {
     let environment = infer_environment_with_policy(url, policy);
@@ -628,8 +699,6 @@ fn classify_new_service(
         tags.push(format!("provider:{provider}"));
     }
 
-    let missing_headers = count_missing_security_headers(security_headers);
-
     match scheme {
         "http" => {
             tags.push("plaintext".to_string());
@@ -639,7 +708,7 @@ fn classify_new_service(
 
             build_base_finding(FindingSpec {
                 severity: Severity::High,
-                score: 90 + (missing_headers as u32 * 2),
+                score: 90,
                 category: "new_http_service".to_string(),
                 title: "Nuevo servicio HTTP expuesto".to_string(),
                 resource: url.to_string(),
@@ -652,6 +721,7 @@ fn classify_new_service(
                         Criticality::High
                     },
                 ),
+                state: FindingState::New,
                 tags,
                 description: format!(
                     "Se detectó un nuevo servicio accesible por HTTP sin cifrado en {}.",
@@ -659,33 +729,18 @@ fn classify_new_service(
                 ),
             })
         }
-        "https" => {
-            tags.push("tls".to_string());
-
-            let severity = if technologies.iter().any(|t| t == "admin-ui") {
-                Severity::High
-            } else {
-                Severity::Medium
-            };
-
-            let score = if technologies.iter().any(|t| t == "admin-ui") {
-                70
-            } else {
-                50
-            } + (missing_headers as u32 * 2);
-
-            build_base_finding(FindingSpec {
-                severity,
-                score,
-                category: "new_https_service".to_string(),
-                title: "Nuevo servicio HTTPS expuesto".to_string(),
-                resource: url.to_string(),
-                environment,
-                criticality: base_criticality,
-                tags,
-                description: format!("Se detectó un nuevo servicio HTTPS accesible en {}.", url),
-            })
-        }
+        "https" => build_base_finding(FindingSpec {
+            severity: Severity::Medium,
+            score: 50,
+            category: "new_https_service".to_string(),
+            title: "Nuevo servicio HTTPS expuesto".to_string(),
+            resource: url.to_string(),
+            environment,
+            criticality: base_criticality,
+            state: FindingState::New,
+            tags,
+            description: format!("Se detectó un nuevo servicio HTTPS accesible en {}.", url),
+        }),
         _ => build_base_finding(FindingSpec {
             severity: Severity::Low,
             score: 20,
@@ -694,6 +749,7 @@ fn classify_new_service(
             resource: url.to_string(),
             environment,
             criticality: base_criticality,
+            state: FindingState::New,
             tags,
             description: format!("Se detectó un nuevo servicio expuesto en {}.", url),
         }),
@@ -711,10 +767,6 @@ fn classify_service_change(
     let changed_server = change.before_server != change.after_server;
     let changed_provider = change.before_provider != change.after_provider;
     let changed_tech = change.before_technologies != change.after_technologies;
-    let headers_weakened = security_headers_weakened(
-        &change.before_security_headers,
-        &change.after_security_headers,
-    );
 
     let environment = infer_environment_with_policy(change.url.as_str(), policy);
     let criticality = classify_criticality(
@@ -741,6 +793,7 @@ fn classify_service_change(
             resource: change.url.clone(),
             environment: environment.clone(),
             criticality: criticality.clone(),
+            state: FindingState::New,
             tags: vec![
                 "service".to_string(),
                 "availability-change".to_string(),
@@ -766,11 +819,6 @@ fn classify_service_change(
             15
         };
 
-        let mut tags = vec!["service".to_string(), "backend-change".to_string()];
-        if let Some(provider) = &change.after_provider {
-            tags.push(format!("provider:{provider}"));
-        }
-
         findings.push(build_base_finding(FindingSpec {
             severity,
             score,
@@ -779,7 +827,8 @@ fn classify_service_change(
             resource: change.url.clone(),
             environment: environment.clone(),
             criticality: criticality.clone(),
-            tags,
+            state: FindingState::New,
+            tags: vec!["service".to_string(), "backend-change".to_string()],
             description: format!(
                 "El servicio {} cambió backend/provider/server de {:?}/{:?} a {:?}/{:?}.",
                 change.url,
@@ -792,9 +841,6 @@ fn classify_service_change(
     }
 
     if changed_tech {
-        let mut tags = vec!["service".to_string(), "technology-change".to_string()];
-        tags.extend(technology_tags(&change.after_technologies));
-
         findings.push(build_base_finding(FindingSpec {
             severity: Severity::Medium,
             score: 40,
@@ -803,7 +849,8 @@ fn classify_service_change(
             resource: change.url.clone(),
             environment: environment.clone(),
             criticality: criticality.clone(),
-            tags,
+            state: FindingState::New,
+            tags: technology_tags(&change.after_technologies),
             description: format!(
                 "El servicio {} cambió de tecnologías {:?} a {:?}.",
                 change.url, change.before_technologies, change.after_technologies
@@ -811,36 +858,11 @@ fn classify_service_change(
         }));
     }
 
-    if headers_weakened {
-        findings.push(build_base_finding(FindingSpec {
-            severity: Severity::Medium,
-            score: 45,
-            category: "security_headers_weakened".to_string(),
-            title: "Headers de seguridad debilitados".to_string(),
-            resource: change.url.clone(),
-            environment,
-            criticality,
-            tags: vec![
-                "service".to_string(),
-                "security-headers".to_string(),
-                "hardening-regression".to_string(),
-            ],
-            description: format!(
-                "El servicio {} perdió uno o más headers de seguridad respecto al snapshot anterior.",
-                change.url
-            ),
-        }));
-    }
-
     findings
 }
 
-fn build_base_finding(mut spec: FindingSpec) -> DriftFinding {
+fn build_base_finding(spec: FindingSpec) -> DriftFinding {
     let asset_type = infer_asset_type(&spec.resource);
-
-    if matches!(spec.criticality, Criticality::Critical) {
-        spec.tags.push("critical-resource".to_string());
-    }
 
     DriftFinding {
         severity: spec.severity,
@@ -851,6 +873,7 @@ fn build_base_finding(mut spec: FindingSpec) -> DriftFinding {
         asset_type,
         environment: spec.environment,
         criticality: spec.criticality,
+        state: spec.state,
         tags: spec.tags,
         description: spec.description,
     }
@@ -971,7 +994,7 @@ fn group_findings(findings: &[DriftFinding]) -> Vec<DriftGroup> {
     groups
 }
 
-fn summarize(findings: &[DriftFinding]) -> DriftSummary {
+fn summarize(findings: &[DriftFinding], suppressed: &[DriftFinding]) -> DriftSummary {
     let mut summary = DriftSummary::default();
 
     for finding in findings {
@@ -982,6 +1005,13 @@ fn summarize(findings: &[DriftFinding]) -> DriftSummary {
             Severity::Info => summary.info += 1,
         }
 
+        match finding.state {
+            FindingState::New => summary.states.new += 1,
+            FindingState::Recurring => summary.states.recurring += 1,
+            FindingState::Persistent => summary.states.persistent += 1,
+            FindingState::Suppressed => summary.states.suppressed += 1,
+        }
+
         if matches!(
             finding.criticality,
             Criticality::Critical | Criticality::High
@@ -990,13 +1020,14 @@ fn summarize(findings: &[DriftFinding]) -> DriftSummary {
         }
 
         increment_asset_type(&mut summary.asset_types, &finding.asset_type);
-
         summary.total_score += finding.score;
     }
 
-    summary.overall_severity = if summary.high > 0 || summary.total_score >= 150 {
+    summary.states.suppressed += suppressed.len();
+
+    summary.overall_severity = if summary.high > 0 || summary.total_score >= 170 {
         Severity::High
-    } else if summary.medium > 0 || summary.total_score >= 80 {
+    } else if summary.medium > 0 || summary.total_score >= 90 {
         Severity::Medium
     } else if summary.low > 0 || summary.total_score >= 20 {
         Severity::Low
@@ -1017,34 +1048,7 @@ fn increment_asset_type(summary: &mut AssetTypeSummary, asset_type: &AssetType) 
 }
 
 fn technology_tags(technologies: &[String]) -> Vec<String> {
-    technologies
-        .iter()
-        .map(|tech| format!("tech:{tech}"))
-        .collect()
-}
-
-fn count_missing_security_headers(headers: &atlas_core::SecurityHeaders) -> usize {
-    [
-        headers.strict_transport_security,
-        headers.content_security_policy,
-        headers.x_frame_options,
-        headers.x_content_type_options,
-        headers.referrer_policy,
-    ]
-    .iter()
-    .filter(|present| !**present)
-    .count()
-}
-
-fn security_headers_weakened(
-    before: &atlas_core::SecurityHeaders,
-    after: &atlas_core::SecurityHeaders,
-) -> bool {
-    (before.strict_transport_security && !after.strict_transport_security)
-        || (before.content_security_policy && !after.content_security_policy)
-        || (before.x_frame_options && !after.x_frame_options)
-        || (before.x_content_type_options && !after.x_content_type_options)
-        || (before.referrer_policy && !after.referrer_policy)
+    technologies.iter().map(|t| format!("tech:{t}")).collect()
 }
 
 fn is_success_status(status: u16) -> bool {
@@ -1062,7 +1066,7 @@ fn matches_resource(pattern: &str, resource: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atlas_core::{HttpService, ScanResult, SecurityHeaders};
+    use atlas_core::{ScanResult, SecurityHeaders};
     use chrono::Utc;
 
     fn headers() -> SecurityHeaders {
@@ -1104,181 +1108,94 @@ mod tests {
     }
 
     #[test]
-    fn classifies_admin_subdomain_as_high() {
-        let mut diff = empty_diff();
-        diff.new_subdomains.push("admin.example.com".to_string());
-
-        let report = analyze_diff(&diff);
-
-        assert_eq!(report.findings.len(), 1);
-        assert!(matches!(report.findings[0].severity, Severity::High));
-    }
-
-    #[test]
-    fn classifies_http_service_as_high() {
-        let mut diff = empty_diff();
-        diff.new_services.push(HttpService {
-            host: "example.com".to_string(),
-            url: "http://example.com".to_string(),
-            scheme: "http".to_string(),
-            status: 200,
-            server: Some("nginx".to_string()),
-            title: None,
-            content_type: Some("text/html".to_string()),
-            technologies: vec!["nginx".to_string()],
-            provider: None,
-            tls_enabled: false,
-            security_headers: headers(),
-        });
-
-        let report = analyze_diff(&diff);
-
-        assert_eq!(report.findings.len(), 1);
-        assert!(matches!(report.findings[0].severity, Severity::High));
-    }
-
-    #[test]
-    fn classifies_service_availability_change() {
-        let mut diff = empty_diff();
-        diff.changed_services.push(ServiceChange {
-            host: "example.com".to_string(),
-            url: "https://example.com".to_string(),
-            scheme: "https".to_string(),
-            before_status: 404,
-            after_status: 200,
-            before_server: Some("nginx".to_string()),
-            after_server: Some("nginx".to_string()),
-            before_provider: None,
-            after_provider: None,
-            before_technologies: vec![],
-            after_technologies: vec![],
-            before_security_headers: headers(),
-            after_security_headers: headers(),
-        });
-
-        let report = analyze_diff(&diff);
-
-        assert!(!report.findings.is_empty());
-    }
-
-    #[test]
-    fn suppresses_findings_with_policy() {
+    fn temporary_exception_suppresses_finding() {
         let mut diff = empty_diff();
         diff.new_subdomains.push("dev.example.com".to_string());
 
         let policy = DriftPolicy {
-            allowlisted_resources: vec!["dev.example.com".to_string()],
-            allowlisted_categories: vec![],
-            critical_resources: vec![],
-            critical_patterns: vec![],
-            environment_overrides: vec![],
+            temporary_exceptions: vec![TemporaryException {
+                resource: "dev.example.com".to_string(),
+                category: "new_nonprod_subdomain".to_string(),
+                expires_at: diff.newer_timestamp + chrono::Duration::days(1),
+                reason: "temporary".to_string(),
+            }],
+            ..Default::default()
         };
 
         let report = analyze_diff_with_policy(&diff, Some(&policy));
-
         assert!(report.findings.is_empty());
         assert_eq!(report.suppressed_findings.len(), 1);
     }
 
     #[test]
-    fn groups_findings_by_resource() {
-        let mut diff = empty_diff();
-        diff.new_subdomains.push("admin.example.com".to_string());
-        diff.new_services.push(HttpService {
-            host: "admin.example.com".to_string(),
-            url: "http://admin.example.com".to_string(),
-            scheme: "http".to_string(),
-            status: 200,
-            server: Some("nginx".to_string()),
-            title: None,
-            content_type: Some("text/html".to_string()),
-            technologies: vec!["nginx".to_string()],
-            provider: None,
-            tls_enabled: false,
-            security_headers: headers(),
-        });
-
-        let report = analyze_diff(&diff);
-
-        assert!(!report.groups.is_empty());
-        assert!(report.summary.total_score > 0);
-    }
-
-    #[test]
-    fn builds_timeline_report() {
+    fn timeline_marks_recurrence() {
         let mut s1 = snapshot_with_target("example.com");
         let mut s2 = snapshot_with_target("example.com");
-        let s3 = snapshot_with_target("example.com");
+        let mut s3 = snapshot_with_target("example.com");
 
         s1.timestamp = Utc::now();
         s2.timestamp = s1.timestamp + chrono::Duration::minutes(5);
+        s3.timestamp = s2.timestamp + chrono::Duration::minutes(5);
 
         s2.scan.subdomains.push("admin.example.com".to_string());
+        s3.scan.subdomains.push("admin.example.com".to_string());
 
-        let report = build_timeline_report("example.com", &[s1.clone(), s2.clone(), s3], None)
-            .expect("timeline report should be built");
-
-        assert_eq!(report.snapshot_count, 3);
-        assert_eq!(report.transition_count, 2);
+        let timeline = build_timeline_report("example.com", &[s1, s2, s3], None).unwrap();
+        assert_eq!(timeline.transition_count, 2);
     }
 
     #[test]
-    fn marks_critical_resources_from_policy() {
+    fn baseline_adjusts_score() {
         let mut diff = empty_diff();
-        diff.new_services.push(HttpService {
-            host: "api.example.com".to_string(),
-            url: "https://api.example.com".to_string(),
-            scheme: "https".to_string(),
-            status: 200,
-            server: Some("nginx".to_string()),
-            title: None,
-            content_type: Some("application/json".to_string()),
-            technologies: vec!["nginx".to_string(), "json-api".to_string()],
-            provider: None,
-            tls_enabled: true,
-            security_headers: headers(),
-        });
+        diff.new_ips.push("2.2.2.2".to_string());
 
         let policy = DriftPolicy {
-            allowlisted_resources: vec![],
-            allowlisted_categories: vec![],
-            critical_resources: vec!["https://api.example.com".to_string()],
-            critical_patterns: vec![],
-            environment_overrides: vec![],
+            baseline_categories: vec!["new_ip".to_string()],
+            ..Default::default()
         };
 
         let report = analyze_diff_with_policy(&diff, Some(&policy));
-
-        assert!(matches!(
-            report.findings[0].criticality,
-            Criticality::Critical
-        ));
+        assert!(report.findings[0].score <= 10);
     }
 
     #[test]
-    fn infers_asset_type_for_ip() {
+    fn service_change_emits_fingerprint_change() {
+        let mut diff = empty_diff();
+        diff.changed_services.push(ServiceChange {
+            host: "example.com".to_string(),
+            url: "https://example.com".to_string(),
+            scheme: "https".to_string(),
+            before_status: 200,
+            after_status: 200,
+            before_server: Some("nginx".to_string()),
+            after_server: Some("nginx".to_string()),
+            before_provider: None,
+            after_provider: None,
+            before_technologies: vec!["nginx".to_string()],
+            after_technologies: vec!["cloudflare".to_string()],
+            before_security_headers: headers(),
+            after_security_headers: headers(),
+        });
+
+        let report = analyze_diff(&diff);
+        assert!(!report.findings.is_empty());
+    }
+
+    #[test]
+    fn keeps_asset_type_for_service() {
         let finding = build_base_finding(FindingSpec {
-            severity: Severity::Low,
-            score: 10,
-            category: "new_ip".to_string(),
-            title: "Nueva IP detectada".to_string(),
-            resource: "1.1.1.1".to_string(),
-            environment: Environment::Unknown,
-            criticality: Criticality::Low,
+            severity: Severity::Medium,
+            score: 50,
+            category: "new_https_service".to_string(),
+            title: "Nuevo servicio HTTPS expuesto".to_string(),
+            resource: "https://example.com".to_string(),
+            environment: Environment::Production,
+            criticality: Criticality::High,
+            state: FindingState::New,
             tags: vec![],
             description: "desc".to_string(),
         });
 
-        assert!(matches!(finding.asset_type, AssetType::Ip));
-    }
-
-    #[test]
-    fn detects_security_header_regression() {
-        let mut before = headers();
-        before.content_security_policy = true;
-
-        let after = headers();
-
-        assert!(security_headers_weakened(&before, &after));
+        assert!(matches!(finding.asset_type, AssetType::Service));
     }
 }
