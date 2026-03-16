@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use atlas_core::ScanResult;
 use atlas_graph::ExposureGraph;
+use atlas_query::{GraphStatsReport, QueryResult};
 use std::fs;
 use std::path::Path;
 
@@ -75,6 +76,90 @@ pub fn print_human_exposure_graph(graph: &ExposureGraph) {
                 "  - {} -> {} | kind={} | weight={}",
                 edge.from, edge.to, edge.kind, edge.weight
             );
+        }
+    }
+}
+
+pub fn print_human_graph_stats(report: &GraphStatsReport) {
+    println!("Target: {}", report.target);
+    println!("Generated at: {}", report.generated_at);
+    println!("Nodes: {}", report.node_count);
+    println!("Edges: {}", report.edge_count);
+
+    println!();
+    println!("Nodos por tipo:");
+    println!("  - Targets: {}", report.stats.targets);
+    println!("  - Subdomains: {}", report.stats.subdomains);
+    println!("  - IPs: {}", report.stats.ips);
+    println!("  - Services: {}", report.stats.services);
+    println!("  - Technologies: {}", report.stats.technologies);
+    println!("  - Episodes: {}", report.stats.episodes);
+
+    println!();
+    println!("Relaciones por tipo:");
+    println!("  - contains: {}", report.stats.contains_edges);
+    println!("  - resolves_to: {}", report.stats.resolves_to_edges);
+    println!("  - exposes: {}", report.stats.exposes_edges);
+    println!(
+        "  - fingerprints_as: {}",
+        report.stats.fingerprints_as_edges
+    );
+    println!(
+        "  - participates_in: {}",
+        report.stats.participates_in_edges
+    );
+    println!("  - belongs_to: {}", report.stats.belongs_to_edges);
+
+    println!();
+    println!("Topología:");
+    println!("  - Connected nodes: {}", report.topology.connected_nodes);
+    println!("  - Isolated nodes: {}", report.topology.isolated_nodes);
+    println!("  - Max degree: {}", report.topology.max_degree);
+
+    if !report.topology.highest_degree_nodes.is_empty() {
+        println!();
+        println!("Nodos con mayor grado:");
+        for node in &report.topology.highest_degree_nodes {
+            println!(
+                "  - {} [{}] | degree={} | id={}",
+                node.label, node.kind, node.degree, node.node_id
+            );
+        }
+    }
+}
+
+pub fn print_human_query_result(result: &QueryResult) {
+    println!("Target: {}", result.target);
+    println!("Query: {}", result.raw_query);
+    println!("Matches: {}", result.summary.total_matches);
+    println!("Max degree: {}", result.summary.max_degree);
+
+    if !result.summary.kind_counts.is_empty() {
+        println!();
+        println!("Distribución por tipo:");
+        for (kind, count) in &result.summary.kind_counts {
+            println!("  - {}: {}", kind, count);
+        }
+    }
+
+    if result.matched_nodes.is_empty() {
+        println!();
+        println!("No se encontraron resultados.");
+        return;
+    }
+
+    println!();
+    println!("Resultados:");
+    for node in &result.matched_nodes {
+        println!(
+            "  - {} [{}] | degree={} | id={}",
+            node.label, node.kind, node.degree, node.node_id
+        );
+
+        if !node.attributes.is_empty() {
+            for (key, value) in &node.attributes {
+                println!("      {}={}", key, value);
+            }
         }
     }
 }

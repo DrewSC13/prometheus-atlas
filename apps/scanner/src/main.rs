@@ -1,6 +1,9 @@
 use anyhow::{bail, Context, Result};
 use atlas_config::AppConfig;
 use atlas_plugins::default_registry_for;
+use atlas_query::{
+    build_graph_stats_report, execute_query, graph_search, parse_query, GraphSearchRequest,
+};
 use atlas_store::{AtlasStore, ExportFormat};
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -122,6 +125,53 @@ enum Commands {
 
         #[arg(long)]
         persist: bool,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    GraphStats {
+        target: String,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    GraphSearch {
+        target: String,
+
+        #[arg(long)]
+        kind: Option<String>,
+
+        #[arg(long)]
+        label_contains: Option<String>,
+
+        #[arg(long)]
+        min_degree: Option<usize>,
+
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    Query {
+        target: String,
+
+        expression: String,
+
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
 
         #[arg(long)]
         json: bool,
@@ -309,15 +359,7 @@ async fn main() -> Result<()> {
             let newer_snapshot = atlas_snapshot::load_snapshot(&newer)?;
             let diff = atlas_diff::diff_snapshots(&older_snapshot, &newer_snapshot);
 
-            let policy_loaded = match policy.as_deref() {
-                Some(path) => {
-                    let loaded = atlas_drift::DriftPolicy::load_from_path(path)?;
-                    loaded.validate()?;
-                    Some(loaded)
-                }
-                None => None,
-            };
-
+            let policy_loaded = load_policy(policy.as_deref())?;
             let mut drift = atlas_drift::analyze_diff_with_policy(&diff, policy_loaded.as_ref());
 
             let registry = default_registry_for(&config.plugins.enabled);
@@ -368,15 +410,7 @@ async fn main() -> Result<()> {
         } => {
             let started = Instant::now();
             let snapshots = atlas_snapshot::load_all_snapshots_for_target(&dir, &target)?;
-
-            let policy_loaded = match policy.as_deref() {
-                Some(path) => {
-                    let loaded = atlas_drift::DriftPolicy::load_from_path(path)?;
-                    loaded.validate()?;
-                    Some(loaded)
-                }
-                None => None,
-            };
+            let policy_loaded = load_policy(policy.as_deref())?;
 
             let mut timeline =
                 atlas_drift::build_timeline_report(&target, &snapshots, policy_loaded.as_ref())?;
@@ -416,15 +450,7 @@ async fn main() -> Result<()> {
         } => {
             let started = Instant::now();
             let snapshots = atlas_snapshot::load_all_snapshots_for_target(&dir, &target)?;
-
-            let policy_loaded = match policy.as_deref() {
-                Some(path) => {
-                    let loaded = atlas_drift::DriftPolicy::load_from_path(path)?;
-                    loaded.validate()?;
-                    Some(loaded)
-                }
-                None => None,
-            };
+            let policy_loaded = load_policy(policy.as_deref())?;
 
             let mut timeline =
                 atlas_drift::build_timeline_report(&target, &snapshots, policy_loaded.as_ref())?;
@@ -481,58 +507,8 @@ async fn main() -> Result<()> {
             output,
         } => {
             let started = Instant::now();
-
-            let snapshots = atlas_snapshot::load_all_snapshots_for_target(&dir, &target)?;
-            if snapshots.is_empty() {
-                bail!("no hay snapshots para construir el grafo de {target}");
-            }
-
-            let latest_snapshot = snapshots.last().cloned();
-
-            let policy_loaded = match policy.as_deref() {
-                Some(path) => {
-                    let loaded = atlas_drift::DriftPolicy::load_from_path(path)?;
-                    loaded.validate()?;
-                    Some(loaded)
-                }
-                None => None,
-            };
-
-            let mut maybe_timeline = None;
-            let mut maybe_collection = None;
-
-            if snapshots.len() >= 2 {
-                let mut timeline = atlas_drift::build_timeline_report(
-                    &target,
-                    &snapshots,
-                    policy_loaded.as_ref(),
-                )?;
-
-                let registry = default_registry_for(&config.plugins.enabled);
-                registry.apply_timeline_report(&mut timeline);
-
-                let mut clusters_by_transition = Vec::new();
-                for transition in &timeline.transitions {
-                    let clusters = atlas_correlation::correlate_report(&transition.report)?;
-                    clusters_by_transition.push(clusters);
-                }
-
-                let collection = atlas_episodes::build_episodes_for_timeline(
-                    &target,
-                    &timeline,
-                    &clusters_by_transition,
-                )?;
-
-                maybe_timeline = Some(timeline);
-                maybe_collection = Some(collection);
-            }
-
-            let graph = atlas_graph::build_full_graph(
-                &target,
-                latest_snapshot.as_ref(),
-                maybe_timeline.as_ref(),
-                maybe_collection.as_ref(),
-            );
+            let graph =
+                build_graph_from_snapshots_and_context(&config, &target, &dir, policy.as_deref())?;
 
             if want_json {
                 atlas_output::write_json_output(&graph, output.as_deref())?;
@@ -558,9 +534,120 @@ async fn main() -> Result<()> {
                 json!({
                     "nodes": graph.node_count,
                     "edges": graph.edge_count,
-                    "persisted": should_persist,
-                    "has_timeline": maybe_timeline.is_some(),
-                    "has_episodes": maybe_collection.is_some()
+                    "persisted": should_persist
+                }),
+            )?;
+        }
+
+        Commands::GraphStats {
+            target,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let graph = require_latest_graph(&store, &target)?;
+
+            let report = build_graph_stats_report(&graph);
+
+            if want_json {
+                atlas_output::write_json_output(&report, output.as_deref())?;
+            } else {
+                atlas_output::print_human_graph_stats(&report);
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "graph-stats",
+                Some(&target),
+                started.elapsed().as_millis(),
+                json!({
+                    "nodes": report.node_count,
+                    "edges": report.edge_count
+                }),
+            )?;
+        }
+
+        Commands::GraphSearch {
+            target,
+            kind,
+            label_contains,
+            min_degree,
+            limit,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let graph = require_latest_graph(&store, &target)?;
+
+            let search_kind = match kind {
+                Some(value) => Some(parse_node_kind_loose(&value)?),
+                None => None,
+            };
+
+            let result = graph_search(
+                &graph,
+                &GraphSearchRequest {
+                    kind: search_kind,
+                    label_contains,
+                    min_degree,
+                    limit,
+                },
+            );
+
+            if want_json {
+                atlas_output::write_json_output(&result, output.as_deref())?;
+            } else {
+                atlas_output::print_human_query_result(&result);
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "graph-search",
+                Some(&target),
+                started.elapsed().as_millis(),
+                json!({
+                    "matches": result.summary.total_matches,
+                    "limit": limit
+                }),
+            )?;
+        }
+
+        Commands::Query {
+            target,
+            expression,
+            limit,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let graph = require_latest_graph(&store, &target)?;
+
+            let query = parse_query(&expression, limit)?;
+            let result = execute_query(&graph, &query)?;
+
+            if want_json {
+                atlas_output::write_json_output(&result, output.as_deref())?;
+            } else {
+                atlas_output::print_human_query_result(&result);
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "query",
+                Some(&target),
+                started.elapsed().as_millis(),
+                json!({
+                    "expression": expression,
+                    "matches": result.summary.total_matches
                 }),
             )?;
         }
@@ -692,6 +779,83 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn build_graph_from_snapshots_and_context(
+    config: &AppConfig,
+    target: &str,
+    dir: &Path,
+    policy_path: Option<&Path>,
+) -> Result<atlas_graph::ExposureGraph> {
+    let snapshots = atlas_snapshot::load_all_snapshots_for_target(dir, target)?;
+    if snapshots.is_empty() {
+        bail!("no hay snapshots para construir el grafo de {target}");
+    }
+
+    let latest_snapshot = snapshots.last().cloned();
+    let policy_loaded = load_policy(policy_path)?;
+
+    let mut maybe_timeline = None;
+    let mut maybe_collection = None;
+
+    if snapshots.len() >= 2 {
+        let mut timeline =
+            atlas_drift::build_timeline_report(target, &snapshots, policy_loaded.as_ref())?;
+
+        let registry = default_registry_for(&config.plugins.enabled);
+        registry.apply_timeline_report(&mut timeline);
+
+        let mut clusters_by_transition = Vec::new();
+        for transition in &timeline.transitions {
+            let clusters = atlas_correlation::correlate_report(&transition.report)?;
+            clusters_by_transition.push(clusters);
+        }
+
+        let collection = atlas_episodes::build_episodes_for_timeline(
+            target,
+            &timeline,
+            &clusters_by_transition,
+        )?;
+
+        maybe_timeline = Some(timeline);
+        maybe_collection = Some(collection);
+    }
+
+    Ok(atlas_graph::build_full_graph(
+        target,
+        latest_snapshot.as_ref(),
+        maybe_timeline.as_ref(),
+        maybe_collection.as_ref(),
+    ))
+}
+
+fn require_latest_graph(store: &AtlasStore, target: &str) -> Result<atlas_graph::ExposureGraph> {
+    store
+        .load_latest_graph(target)?
+        .ok_or_else(|| anyhow::anyhow!("no existe un grafo persistido para {target}; ejecuta primero `atlas graph {target} --persist`"))
+}
+
+fn load_policy(path: Option<&Path>) -> Result<Option<atlas_drift::DriftPolicy>> {
+    match path {
+        Some(path) => {
+            let loaded = atlas_drift::DriftPolicy::load_from_path(path)?;
+            loaded.validate()?;
+            Ok(Some(loaded))
+        }
+        None => Ok(None),
+    }
+}
+
+fn parse_node_kind_loose(input: &str) -> Result<atlas_graph::NodeKind> {
+    match input.to_ascii_lowercase().as_str() {
+        "target" | "targets" => Ok(atlas_graph::NodeKind::Target),
+        "subdomain" | "subdomains" => Ok(atlas_graph::NodeKind::Subdomain),
+        "ip" | "ips" => Ok(atlas_graph::NodeKind::Ip),
+        "service" | "services" => Ok(atlas_graph::NodeKind::Service),
+        "technology" | "technologies" | "tech" => Ok(atlas_graph::NodeKind::Technology),
+        "episode" | "episodes" => Ok(atlas_graph::NodeKind::Episode),
+        other => bail!("node kind no soportado: {other}"),
+    }
 }
 
 fn init_tracing(config: &AppConfig) -> Result<()> {
