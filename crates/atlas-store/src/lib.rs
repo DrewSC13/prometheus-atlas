@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use atlas_drift::DriftReport;
 use atlas_episodes::RiskEpisode;
+use atlas_graph::{EdgeKind, ExposureGraph, GraphEdge, GraphNode, NodeKind};
 use atlas_jobs::AtlasJob;
 use atlas_snapshot::Snapshot;
 use chrono::{DateTime, Utc};
@@ -104,6 +105,23 @@ pub struct StoredEpisode {
     pub summary: String,
     pub explanation_json: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredGraphRecord {
+    pub graph_id: String,
+    pub target: String,
+    pub node_count: usize,
+    pub edge_count: usize,
+    pub generated_at: String,
+    pub summary_json: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone)]
+struct TableColumn {
+    name: String,
+    declared_type: String,
 }
 
 pub struct AtlasStore {
@@ -214,9 +232,46 @@ impl AtlasStore {
                 explanation_json TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS graphs (
+                graph_id TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                node_count INTEGER NOT NULL,
+                edge_count INTEGER NOT NULL,
+                generated_at TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS graph_nodes (
+                graph_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                target TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                label TEXT NOT NULL,
+                first_seen TEXT,
+                last_seen TEXT,
+                attributes_json TEXT NOT NULL,
+                PRIMARY KEY (graph_id, node_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS graph_edges (
+                graph_id TEXT NOT NULL,
+                edge_id TEXT NOT NULL,
+                target TEXT NOT NULL,
+                from_node TEXT NOT NULL,
+                to_node TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                weight INTEGER NOT NULL,
+                first_seen TEXT,
+                last_seen TEXT,
+                attributes_json TEXT NOT NULL,
+                PRIMARY KEY (graph_id, edge_id)
+            );
             "#,
         )?;
 
+        self.repair_legacy_snapshots_table_if_needed()?;
         Ok(())
     }
 
@@ -871,6 +926,331 @@ impl AtlasStore {
 
         Ok(episodes)
     }
+
+    pub fn store_graph(&self, target: &str, graph: &ExposureGraph) -> Result<()> {
+        let graph_id = format!(
+            "{}:{}",
+            target,
+            graph
+                .generated_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        );
+
+        let summary_json = serde_json::to_string(&serde_json::json!({
+            "stats": graph.stats,
+            "topology": graph.topology,
+        }))?;
+
+        let created_at = Utc::now().to_rfc3339();
+
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO graphs (
+                graph_id,
+                target,
+                node_count,
+                edge_count,
+                generated_at,
+                summary_json,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                graph_id,
+                target,
+                graph.node_count,
+                graph.edge_count,
+                graph.generated_at.to_rfc3339(),
+                summary_json,
+                created_at,
+            ],
+        )?;
+
+        self.conn.execute(
+            "DELETE FROM graph_nodes WHERE graph_id = ?1",
+            params![graph_id.clone()],
+        )?;
+        self.conn.execute(
+            "DELETE FROM graph_edges WHERE graph_id = ?1",
+            params![graph_id.clone()],
+        )?;
+
+        for node in &graph.nodes {
+            self.conn.execute(
+                r#"
+                INSERT INTO graph_nodes (
+                    graph_id,
+                    node_id,
+                    target,
+                    kind,
+                    label,
+                    first_seen,
+                    last_seen,
+                    attributes_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                "#,
+                params![
+                    graph_id,
+                    node.node_id,
+                    node.target,
+                    node.kind.to_string(),
+                    node.label,
+                    node.first_seen.map(|d| d.to_rfc3339()),
+                    node.last_seen.map(|d| d.to_rfc3339()),
+                    serde_json::to_string(&node.attributes)?,
+                ],
+            )?;
+        }
+
+        for edge in &graph.edges {
+            self.conn.execute(
+                r#"
+                INSERT INTO graph_edges (
+                    graph_id,
+                    edge_id,
+                    target,
+                    from_node,
+                    to_node,
+                    kind,
+                    weight,
+                    first_seen,
+                    last_seen,
+                    attributes_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "#,
+                params![
+                    graph_id,
+                    edge.edge_id,
+                    edge.target,
+                    edge.from,
+                    edge.to,
+                    edge.kind.to_string(),
+                    edge.weight,
+                    edge.first_seen.map(|d| d.to_rfc3339()),
+                    edge.last_seen.map(|d| d.to_rfc3339()),
+                    serde_json::to_string(&edge.attributes)?,
+                ],
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn list_graphs(&self, target: &str) -> Result<Vec<StoredGraphRecord>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                graph_id,
+                target,
+                node_count,
+                edge_count,
+                generated_at,
+                summary_json,
+                created_at
+            FROM graphs
+            WHERE target = ?1
+            ORDER BY generated_at DESC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([target], |row| {
+            Ok(StoredGraphRecord {
+                graph_id: row.get(0)?,
+                target: row.get(1)?,
+                node_count: row.get(2)?,
+                edge_count: row.get(3)?,
+                generated_at: row.get(4)?,
+                summary_json: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })?;
+
+        let mut graphs = Vec::new();
+        for row in rows {
+            graphs.push(row?);
+        }
+
+        Ok(graphs)
+    }
+
+    pub fn load_latest_graph(&self, target: &str) -> Result<Option<ExposureGraph>> {
+        let graph_row = self.conn.query_row(
+            r#"
+            SELECT graph_id, generated_at
+            FROM graphs
+            WHERE target = ?1
+            ORDER BY generated_at DESC
+            LIMIT 1
+            "#,
+            [target],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        );
+
+        let (graph_id, generated_at_str) = match graph_row {
+            Ok(row) => row,
+            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+
+        let mut nodes_stmt = self.conn.prepare(
+            r#"
+            SELECT
+                node_id,
+                target,
+                kind,
+                label,
+                first_seen,
+                last_seen,
+                attributes_json
+            FROM graph_nodes
+            WHERE graph_id = ?1
+            ORDER BY node_id ASC
+            "#,
+        )?;
+
+        let node_rows = nodes_stmt.query_map([graph_id.clone()], |row| {
+            let kind_str: String = row.get(2)?;
+            let attrs_json: String = row.get(6)?;
+            let attrs = serde_json::from_str(&attrs_json).unwrap_or_default();
+
+            Ok(GraphNode {
+                node_id: row.get(0)?,
+                target: row.get(1)?,
+                kind: NodeKind::from_str(&kind_str).map_err(to_sql_err)?,
+                label: row.get(3)?,
+                first_seen: parse_optional_datetime(row.get(4)?),
+                last_seen: parse_optional_datetime(row.get(5)?),
+                attributes: attrs,
+            })
+        })?;
+
+        let mut nodes = Vec::new();
+        for row in node_rows {
+            nodes.push(row?);
+        }
+
+        let mut edges_stmt = self.conn.prepare(
+            r#"
+            SELECT
+                edge_id,
+                target,
+                from_node,
+                to_node,
+                kind,
+                weight,
+                first_seen,
+                last_seen,
+                attributes_json
+            FROM graph_edges
+            WHERE graph_id = ?1
+            ORDER BY edge_id ASC
+            "#,
+        )?;
+
+        let edge_rows = edges_stmt.query_map([graph_id], |row| {
+            let kind_str: String = row.get(4)?;
+            let attrs_json: String = row.get(8)?;
+            let attrs = serde_json::from_str(&attrs_json).unwrap_or_default();
+
+            Ok(GraphEdge {
+                edge_id: row.get(0)?,
+                target: row.get(1)?,
+                from: row.get(2)?,
+                to: row.get(3)?,
+                kind: EdgeKind::from_str(&kind_str).map_err(to_sql_err)?,
+                weight: row.get(5)?,
+                first_seen: parse_optional_datetime(row.get(6)?),
+                last_seen: parse_optional_datetime(row.get(7)?),
+                attributes: attrs,
+            })
+        })?;
+
+        let mut edges = Vec::new();
+        for row in edge_rows {
+            edges.push(row?);
+        }
+
+        let mut graph = ExposureGraph {
+            target: target.to_string(),
+            generated_at: parse_datetime(generated_at_str)?,
+            node_count: nodes.len(),
+            edge_count: edges.len(),
+            nodes,
+            edges,
+            stats: atlas_graph::GraphStats::default(),
+            topology: atlas_graph::GraphTopologySummary::default(),
+        };
+        graph.recompute_metadata();
+
+        Ok(Some(graph))
+    }
+
+    fn repair_legacy_snapshots_table_if_needed(&self) -> Result<()> {
+        let columns = self.read_table_info("snapshots")?;
+        if columns.is_empty() {
+            return Ok(());
+        }
+
+        let expected = [
+            ("snapshot_id", "TEXT"),
+            ("target", "TEXT"),
+            ("timestamp", "TEXT"),
+            ("snapshot_version", "INTEGER"),
+            ("file_hash", "TEXT"),
+            ("path", "TEXT"),
+            ("created_at", "TEXT"),
+        ];
+
+        let compatible = expected.iter().all(|(name, expected_type)| {
+            columns.iter().any(|column| {
+                column.name == *name
+                    && column
+                        .declared_type
+                        .to_ascii_uppercase()
+                        .contains(&expected_type.to_ascii_uppercase())
+            })
+        });
+
+        if compatible {
+            return Ok(());
+        }
+
+        self.conn.execute_batch(
+            r#"
+            DROP TABLE IF EXISTS snapshots_legacy_incompatible;
+            ALTER TABLE snapshots RENAME TO snapshots_legacy_incompatible;
+
+            CREATE TABLE snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                snapshot_version INTEGER NOT NULL,
+                file_hash TEXT NOT NULL,
+                path TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            "#,
+        )?;
+
+        Ok(())
+    }
+
+    fn read_table_info(&self, table: &str) -> Result<Vec<TableColumn>> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut stmt = self.conn.prepare(&pragma)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(TableColumn {
+                name: row.get(1)?,
+                declared_type: row.get(2)?,
+            })
+        })?;
+
+        let mut columns = Vec::new();
+        for row in rows {
+            columns.push(row?);
+        }
+        Ok(columns)
+    }
 }
 
 fn compute_snapshot_hash(path: &Path) -> Result<String> {
@@ -901,4 +1281,62 @@ fn parse_optional_datetime(value: Option<String>) -> Option<DateTime<Utc>> {
 
 fn escape_csv(input: &str) -> String {
     input.replace('"', "\"\"")
+}
+
+fn to_sql_err(err: anyhow::Error) -> rusqlite::Error {
+    rusqlite::Error::FromSqlConversionFailure(
+        0,
+        rusqlite::types::Type::Text,
+        Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            err.to_string(),
+        )),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use atlas_graph::{EdgeKind, ExposureGraph, GraphNode, NodeKind};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn stores_and_loads_graph() {
+        let db_path = std::env::temp_dir().join(format!(
+            "atlas-store-graph-test-{}.db",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+
+        let store = AtlasStore::open(&db_path).unwrap();
+        store.initialize().unwrap();
+
+        let mut graph = ExposureGraph::empty("example.com");
+        graph.nodes.push(GraphNode {
+            node_id: "node1".to_string(),
+            kind: NodeKind::Subdomain,
+            label: "admin.example.com".to_string(),
+            target: "example.com".to_string(),
+            first_seen: None,
+            last_seen: None,
+            attributes: BTreeMap::new(),
+        });
+        graph.edges.push(GraphEdge {
+            edge_id: "edge1".to_string(),
+            from: graph.nodes[0].node_id.clone(),
+            to: "node1".to_string(),
+            kind: EdgeKind::BelongsTo,
+            target: "example.com".to_string(),
+            weight: 1,
+            first_seen: None,
+            last_seen: None,
+            attributes: BTreeMap::new(),
+        });
+        graph.recompute_metadata();
+
+        store.store_graph("example.com", &graph).unwrap();
+        let loaded = store.load_latest_graph("example.com").unwrap().unwrap();
+
+        assert_eq!(loaded.target, "example.com");
+        assert!(loaded.node_count >= 1);
+    }
 }

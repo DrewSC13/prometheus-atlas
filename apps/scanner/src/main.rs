@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use atlas_config::AppConfig;
 use atlas_plugins::default_registry_for;
 use atlas_store::{AtlasStore, ExportFormat};
@@ -93,6 +93,25 @@ enum Commands {
     },
 
     Episodes {
+        target: String,
+
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        #[arg(long)]
+        persist: bool,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    Graph {
         target: String,
 
         #[arg(long, default_value = ".snapshots")]
@@ -449,6 +468,99 @@ async fn main() -> Result<()> {
                 json!({
                     "episodes": collection.episode_count,
                     "persisted": should_persist
+                }),
+            )?;
+        }
+
+        Commands::Graph {
+            target,
+            dir,
+            policy,
+            persist,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+
+            let snapshots = atlas_snapshot::load_all_snapshots_for_target(&dir, &target)?;
+            if snapshots.is_empty() {
+                bail!("no hay snapshots para construir el grafo de {target}");
+            }
+
+            let latest_snapshot = snapshots.last().cloned();
+
+            let policy_loaded = match policy.as_deref() {
+                Some(path) => {
+                    let loaded = atlas_drift::DriftPolicy::load_from_path(path)?;
+                    loaded.validate()?;
+                    Some(loaded)
+                }
+                None => None,
+            };
+
+            let mut maybe_timeline = None;
+            let mut maybe_collection = None;
+
+            if snapshots.len() >= 2 {
+                let mut timeline = atlas_drift::build_timeline_report(
+                    &target,
+                    &snapshots,
+                    policy_loaded.as_ref(),
+                )?;
+
+                let registry = default_registry_for(&config.plugins.enabled);
+                registry.apply_timeline_report(&mut timeline);
+
+                let mut clusters_by_transition = Vec::new();
+                for transition in &timeline.transitions {
+                    let clusters = atlas_correlation::correlate_report(&transition.report)?;
+                    clusters_by_transition.push(clusters);
+                }
+
+                let collection = atlas_episodes::build_episodes_for_timeline(
+                    &target,
+                    &timeline,
+                    &clusters_by_transition,
+                )?;
+
+                maybe_timeline = Some(timeline);
+                maybe_collection = Some(collection);
+            }
+
+            let graph = atlas_graph::build_full_graph(
+                &target,
+                latest_snapshot.as_ref(),
+                maybe_timeline.as_ref(),
+                maybe_collection.as_ref(),
+            );
+
+            if want_json {
+                atlas_output::write_json_output(&graph, output.as_deref())?;
+            } else {
+                atlas_output::print_human_exposure_graph(&graph);
+            }
+
+            let should_persist = persist || config.drift.persist_by_default;
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+
+            if should_persist {
+                store.initialize()?;
+                store.store_graph(&target, &graph)?;
+                println!("Graph registrado en storage.");
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "graph",
+                Some(&target),
+                started.elapsed().as_millis(),
+                json!({
+                    "nodes": graph.node_count,
+                    "edges": graph.edge_count,
+                    "persisted": should_persist,
+                    "has_timeline": maybe_timeline.is_some(),
+                    "has_episodes": maybe_collection.is_some()
                 }),
             )?;
         }

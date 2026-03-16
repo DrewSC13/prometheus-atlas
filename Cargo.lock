@@ -105,6 +105,7 @@ dependencies = [
  "atlas-discovery",
  "atlas-drift",
  "atlas-episodes",
+ "atlas-graph",
  "atlas-jobs",
  "atlas-output",
  "atlas-plugins",
@@ -208,6 +209,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "atlas-graph"
+version = "0.12.0"
+dependencies = [
+ "anyhow",
+ "atlas-core",
+ "atlas-correlation",
+ "atlas-drift",
+ "atlas-episodes",
+ "atlas-snapshot",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "atlas-http"
 version = "0.12.0"
 dependencies = [
@@ -235,8 +253,7 @@ version = "0.12.0"
 dependencies = [
  "anyhow",
  "atlas-core",
- "atlas-diff",
- "atlas-drift",
+ "atlas-graph",
  "serde",
  "serde_json",
 ]
@@ -284,6 +301,7 @@ dependencies = [
  "anyhow",
  "atlas-drift",
  "atlas-episodes",
+ "atlas-graph",
  "atlas-jobs",
  "atlas-snapshot",
  "chrono",

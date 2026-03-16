@@ -9,6 +9,7 @@ members = [
     "crates/atlas-dns",
     "crates/atlas-drift",
     "crates/atlas-episodes",
+    "crates/atlas-graph",
     "crates/atlas-http",
     "crates/atlas-jobs",
     "crates/atlas-output",

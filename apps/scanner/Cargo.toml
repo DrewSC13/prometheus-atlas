@@ -26,6 +26,7 @@ atlas-diff = { path = "../../crates/atlas-diff" }
 atlas-discovery = { path = "../../crates/atlas-discovery" }
 atlas-drift = { path = "../../crates/atlas-drift" }
 atlas-episodes = { path = "../../crates/atlas-episodes" }
+atlas-graph = { path = "../../crates/atlas-graph" }
 atlas-jobs = { path = "../../crates/atlas-jobs" }
 atlas-output = { path = "../../crates/atlas-output" }
 atlas-plugins = { path = "../../crates/atlas-plugins" }
