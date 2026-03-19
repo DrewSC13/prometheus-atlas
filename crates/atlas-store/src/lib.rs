@@ -5,7 +5,11 @@ use atlas_graph::{EdgeKind, ExposureGraph, GraphEdge, GraphNode, NodeKind};
 use atlas_jobs::AtlasJob;
 use atlas_snapshot::Snapshot;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{
+    params,
+    types::{Type, ValueRef},
+    Connection,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -271,7 +275,7 @@ impl AtlasStore {
             "#,
         )?;
 
-        self.repair_legacy_snapshots_table_if_needed()?;
+        self.repair_all_legacy_tables_if_needed()?;
         Ok(())
     }
 
@@ -353,7 +357,7 @@ impl AtlasStore {
                 older_snapshot.display().to_string(),
                 newer_snapshot.display().to_string(),
                 policy_path.map(|p| p.display().to_string()),
-                report.findings.len(),
+                report.findings.len() + report.suppressed_findings.len(),
                 report.summary.total_score,
                 report.summary.overall_severity.to_string(),
                 now,
@@ -443,15 +447,15 @@ impl AtlasStore {
 
         let rows = stmt.query_map([target], |row| {
             Ok(StoredHistoryItem {
-                run_id: row.get(0)?,
-                target: row.get(1)?,
-                older_snapshot_path: row.get(2)?,
-                newer_snapshot_path: row.get(3)?,
-                policy_path: row.get(4)?,
-                total_findings: row.get(5)?,
-                total_score: row.get(6)?,
-                overall_severity: row.get(7)?,
-                created_at: row.get(8)?,
+                run_id: row_string(row, 0)?,
+                target: row_string(row, 1)?,
+                older_snapshot_path: row_string(row, 2)?,
+                newer_snapshot_path: row_string(row, 3)?,
+                policy_path: row_optional_string(row, 4)?,
+                total_findings: row_usize(row, 5)?,
+                total_score: row_u32(row, 6)?,
+                overall_severity: row_string(row, 7)?,
+                created_at: row_string(row, 8)?,
             })
         })?;
 
@@ -495,25 +499,22 @@ impl AtlasStore {
 
         let rows = stmt.query_map([target], |row| {
             Ok(StoredFinding {
-                finding_id: row.get(0)?,
-                run_id: row.get(1)?,
-                target: row.get(2)?,
-                severity: row.get(3)?,
-                state: row.get(4)?,
-                category: row.get(5)?,
-                title: row.get(6)?,
-                resource: row.get(7)?,
-                asset_type: row.get(8)?,
-                environment: row.get(9)?,
-                criticality: row.get(10)?,
-                score: row.get(11)?,
-                tags_json: row.get(12)?,
-                description: row.get(13)?,
-                is_suppressed: {
-                    let value: i64 = row.get(14)?;
-                    value != 0
-                },
-                created_at: row.get(15)?,
+                finding_id: row_string(row, 0)?,
+                run_id: row_string(row, 1)?,
+                target: row_string(row, 2)?,
+                severity: row_string(row, 3)?,
+                state: row_string(row, 4)?,
+                category: row_string(row, 5)?,
+                title: row_string(row, 6)?,
+                resource: row_string(row, 7)?,
+                asset_type: row_string(row, 8)?,
+                environment: row_string(row, 9)?,
+                criticality: row_string(row, 10)?,
+                score: row_u32(row, 11)?,
+                tags_json: row_string(row, 12)?,
+                description: row_string(row, 13)?,
+                is_suppressed: row_bool(row, 14)?,
+                created_at: row_string(row, 15)?,
             })
         })?;
 
@@ -552,13 +553,13 @@ impl AtlasStore {
 
         let rows = stmt.query_map([target], |row| {
             Ok(StoredSnapshot {
-                snapshot_id: row.get(0)?,
-                target: row.get(1)?,
-                timestamp: row.get(2)?,
-                snapshot_version: row.get(3)?,
-                file_hash: row.get(4)?,
-                path: row.get(5)?,
-                created_at: row.get(6)?,
+                snapshot_id: row_string(row, 0)?,
+                target: row_string(row, 1)?,
+                timestamp: row_string(row, 2)?,
+                snapshot_version: row_u32(row, 3)?,
+                file_hash: row_string(row, 4)?,
+                path: row_string(row, 5)?,
+                created_at: row_string(row, 6)?,
             })
         })?;
 
@@ -619,16 +620,16 @@ impl AtlasStore {
         )?;
 
         let rows = stmt.query_map([limit as i64], |row| {
-            let duration_str: String = row.get(3)?;
-            let duration_ms = duration_str.parse::<u128>().unwrap_or(0);
+            let duration_raw = row_string(row, 3)?;
+            let duration_ms = duration_raw.parse::<u128>().unwrap_or(0);
 
             Ok(StoredTelemetryEvent {
-                telemetry_id: row.get(0)?,
-                name: row.get(1)?,
-                target: row.get(2)?,
+                telemetry_id: row_string(row, 0)?,
+                name: row_string(row, 1)?,
+                target: row_optional_string(row, 2)?,
                 duration_ms,
-                metadata_json: row.get(4)?,
-                created_at: row.get(5)?,
+                metadata_json: row_string(row, 4)?,
+                created_at: row_string(row, 5)?,
             })
         })?;
 
@@ -714,20 +715,15 @@ impl AtlasStore {
         )?;
 
         let rows = stmt.query_map([], |row| {
-            let enabled_value: i64 = row.get(4)?;
-            let policy_path: Option<String> = row.get(5)?;
-            let last_run_at: Option<String> = row.get(6)?;
-            let created_at: String = row.get(7)?;
-
             Ok(AtlasJob {
-                job_id: row.get(0)?,
-                target: row.get(1)?,
-                profile: row.get(2)?,
-                interval_seconds: row.get(3)?,
-                enabled: enabled_value != 0,
-                policy_path,
-                last_run_at: parse_optional_datetime(last_run_at),
-                created_at: parse_datetime(created_at)?,
+                job_id: row_string(row, 0)?,
+                target: row_string(row, 1)?,
+                profile: row_string(row, 2)?,
+                interval_seconds: row_u64(row, 3)?,
+                enabled: row_bool(row, 4)?,
+                policy_path: row_optional_string(row, 5)?,
+                last_run_at: parse_optional_datetime(row_optional_string(row, 6)?),
+                created_at: parse_datetime(row_string(row, 7)?)?,
             })
         })?;
 
@@ -813,7 +809,7 @@ impl AtlasStore {
             "#,
         )?;
 
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map([], |row| row_string(row, 0))?;
 
         let mut resources = Vec::new();
         for row in rows {
@@ -900,22 +896,22 @@ impl AtlasStore {
 
         let rows = stmt.query_map([target], |row| {
             Ok(StoredEpisode {
-                episode_id: row.get(0)?,
-                target: row.get(1)?,
-                title: row.get(2)?,
-                kind: row.get(3)?,
-                severity: row.get(4)?,
-                criticality: row.get(5)?,
-                score: row.get(6)?,
-                state: row.get(7)?,
-                resource_count: row.get(8)?,
-                resources_json: row.get(9)?,
-                cluster_ids_json: row.get(10)?,
-                started_at: row.get(11)?,
-                ended_at: row.get(12)?,
-                summary: row.get(13)?,
-                explanation_json: row.get(14)?,
-                created_at: row.get(15)?,
+                episode_id: row_string(row, 0)?,
+                target: row_string(row, 1)?,
+                title: row_string(row, 2)?,
+                kind: row_string(row, 3)?,
+                severity: row_string(row, 4)?,
+                criticality: row_string(row, 5)?,
+                score: row_u32(row, 6)?,
+                state: row_string(row, 7)?,
+                resource_count: row_usize(row, 8)?,
+                resources_json: row_string(row, 9)?,
+                cluster_ids_json: row_string(row, 10)?,
+                started_at: row_string(row, 11)?,
+                ended_at: row_string(row, 12)?,
+                summary: row_string(row, 13)?,
+                explanation_json: row_string(row, 14)?,
+                created_at: row_string(row, 15)?,
             })
         })?;
 
@@ -1055,13 +1051,13 @@ impl AtlasStore {
 
         let rows = stmt.query_map([target], |row| {
             Ok(StoredGraphRecord {
-                graph_id: row.get(0)?,
-                target: row.get(1)?,
-                node_count: row.get(2)?,
-                edge_count: row.get(3)?,
-                generated_at: row.get(4)?,
-                summary_json: row.get(5)?,
-                created_at: row.get(6)?,
+                graph_id: row_string(row, 0)?,
+                target: row_string(row, 1)?,
+                node_count: row_usize(row, 2)?,
+                edge_count: row_usize(row, 3)?,
+                generated_at: row_string(row, 4)?,
+                summary_json: row_string(row, 5)?,
+                created_at: row_string(row, 6)?,
             })
         })?;
 
@@ -1083,7 +1079,7 @@ impl AtlasStore {
             LIMIT 1
             "#,
             [target],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            |row| Ok((row_string(row, 0)?, row_string(row, 1)?)),
         );
 
         let (graph_id, generated_at_str) = match graph_row {
@@ -1109,17 +1105,17 @@ impl AtlasStore {
         )?;
 
         let node_rows = nodes_stmt.query_map([graph_id.clone()], |row| {
-            let kind_str: String = row.get(2)?;
-            let attrs_json: String = row.get(6)?;
+            let kind_str = row_string(row, 2)?;
+            let attrs_json = row_string(row, 6)?;
             let attrs = serde_json::from_str(&attrs_json).unwrap_or_default();
 
             Ok(GraphNode {
-                node_id: row.get(0)?,
-                target: row.get(1)?,
+                node_id: row_string(row, 0)?,
+                target: row_string(row, 1)?,
                 kind: NodeKind::from_str(&kind_str).map_err(to_sql_err)?,
-                label: row.get(3)?,
-                first_seen: parse_optional_datetime(row.get(4)?),
-                last_seen: parse_optional_datetime(row.get(5)?),
+                label: row_string(row, 3)?,
+                first_seen: parse_optional_datetime(row_optional_string(row, 4)?),
+                last_seen: parse_optional_datetime(row_optional_string(row, 5)?),
                 attributes: attrs,
             })
         })?;
@@ -1148,19 +1144,19 @@ impl AtlasStore {
         )?;
 
         let edge_rows = edges_stmt.query_map([graph_id], |row| {
-            let kind_str: String = row.get(4)?;
-            let attrs_json: String = row.get(8)?;
+            let kind_str = row_string(row, 4)?;
+            let attrs_json = row_string(row, 8)?;
             let attrs = serde_json::from_str(&attrs_json).unwrap_or_default();
 
             Ok(GraphEdge {
-                edge_id: row.get(0)?,
-                target: row.get(1)?,
-                from: row.get(2)?,
-                to: row.get(3)?,
+                edge_id: row_string(row, 0)?,
+                target: row_string(row, 1)?,
+                from: row_string(row, 2)?,
+                to: row_string(row, 3)?,
                 kind: EdgeKind::from_str(&kind_str).map_err(to_sql_err)?,
-                weight: row.get(5)?,
-                first_seen: parse_optional_datetime(row.get(6)?),
-                last_seen: parse_optional_datetime(row.get(7)?),
+                weight: row_u32(row, 5)?,
+                first_seen: parse_optional_datetime(row_optional_string(row, 6)?),
+                last_seen: parse_optional_datetime(row_optional_string(row, 7)?),
                 attributes: attrs,
             })
         })?;
@@ -1185,21 +1181,557 @@ impl AtlasStore {
         Ok(Some(graph))
     }
 
-    fn repair_legacy_snapshots_table_if_needed(&self) -> Result<()> {
-        let columns = self.read_table_info("snapshots")?;
+    fn repair_all_legacy_tables_if_needed(&self) -> Result<()> {
+        self.repair_table_if_needed(
+            "snapshots",
+            &[
+                ("snapshot_id", "TEXT"),
+                ("target", "TEXT"),
+                ("timestamp", "TEXT"),
+                ("snapshot_version", "INTEGER"),
+                ("file_hash", "TEXT"),
+                ("path", "TEXT"),
+                ("created_at", "TEXT"),
+            ],
+            r#"
+            CREATE TABLE snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                snapshot_version INTEGER NOT NULL,
+                file_hash TEXT NOT NULL,
+                path TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            "#,
+            Some(
+                r#"
+                INSERT OR IGNORE INTO snapshots (
+                    snapshot_id,
+                    target,
+                    timestamp,
+                    snapshot_version,
+                    file_hash,
+                    path,
+                    created_at
+                )
+                SELECT
+                    CAST(snapshot_id AS TEXT),
+                    CAST(target AS TEXT),
+                    CAST(timestamp AS TEXT),
+                    CAST(snapshot_version AS INTEGER),
+                    CAST(file_hash AS TEXT),
+                    CAST(path AS TEXT),
+                    CAST(created_at AS TEXT)
+                FROM snapshots_legacy_incompatible
+                "#,
+            ),
+        )?;
+
+        self.repair_table_if_needed(
+            "drift_runs",
+            &[
+                ("run_id", "TEXT"),
+                ("target", "TEXT"),
+                ("older_snapshot_path", "TEXT"),
+                ("newer_snapshot_path", "TEXT"),
+                ("policy_path", "TEXT"),
+                ("total_findings", "INTEGER"),
+                ("total_score", "INTEGER"),
+                ("overall_severity", "TEXT"),
+                ("created_at", "TEXT"),
+            ],
+            r#"
+            CREATE TABLE drift_runs (
+                run_id TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                older_snapshot_path TEXT NOT NULL,
+                newer_snapshot_path TEXT NOT NULL,
+                policy_path TEXT,
+                total_findings INTEGER NOT NULL,
+                total_score INTEGER NOT NULL,
+                overall_severity TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            "#,
+            Some(
+                r#"
+                INSERT OR IGNORE INTO drift_runs (
+                    run_id,
+                    target,
+                    older_snapshot_path,
+                    newer_snapshot_path,
+                    policy_path,
+                    total_findings,
+                    total_score,
+                    overall_severity,
+                    created_at
+                )
+                SELECT
+                    CAST(run_id AS TEXT),
+                    CAST(target AS TEXT),
+                    CAST(older_snapshot_path AS TEXT),
+                    CAST(newer_snapshot_path AS TEXT),
+                    CAST(policy_path AS TEXT),
+                    CAST(total_findings AS INTEGER),
+                    CAST(total_score AS INTEGER),
+                    CAST(overall_severity AS TEXT),
+                    CAST(created_at AS TEXT)
+                FROM drift_runs_legacy_incompatible
+                "#,
+            ),
+        )?;
+
+        self.repair_table_if_needed(
+            "findings",
+            &[
+                ("finding_id", "TEXT"),
+                ("run_id", "TEXT"),
+                ("target", "TEXT"),
+                ("severity", "TEXT"),
+                ("state", "TEXT"),
+                ("category", "TEXT"),
+                ("title", "TEXT"),
+                ("resource", "TEXT"),
+                ("asset_type", "TEXT"),
+                ("environment", "TEXT"),
+                ("criticality", "TEXT"),
+                ("score", "INTEGER"),
+                ("tags_json", "TEXT"),
+                ("description", "TEXT"),
+                ("is_suppressed", "INTEGER"),
+                ("created_at", "TEXT"),
+            ],
+            r#"
+            CREATE TABLE findings (
+                finding_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                target TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                state TEXT NOT NULL,
+                category TEXT NOT NULL,
+                title TEXT NOT NULL,
+                resource TEXT NOT NULL,
+                asset_type TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                criticality TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                tags_json TEXT NOT NULL,
+                description TEXT NOT NULL,
+                is_suppressed INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (finding_id, run_id)
+            )
+            "#,
+            Some(
+                r#"
+                INSERT OR IGNORE INTO findings (
+                    finding_id,
+                    run_id,
+                    target,
+                    severity,
+                    state,
+                    category,
+                    title,
+                    resource,
+                    asset_type,
+                    environment,
+                    criticality,
+                    score,
+                    tags_json,
+                    description,
+                    is_suppressed,
+                    created_at
+                )
+                SELECT
+                    CAST(finding_id AS TEXT),
+                    CAST(COALESCE(run_id, '') AS TEXT),
+                    CAST(target AS TEXT),
+                    CAST(severity AS TEXT),
+                    CAST(state AS TEXT),
+                    CAST(category AS TEXT),
+                    CAST(title AS TEXT),
+                    CAST(resource AS TEXT),
+                    CAST(asset_type AS TEXT),
+                    CAST(environment AS TEXT),
+                    CAST(criticality AS TEXT),
+                    CAST(score AS INTEGER),
+                    CAST(tags_json AS TEXT),
+                    CAST(description AS TEXT),
+                    CAST(COALESCE(is_suppressed, 0) AS INTEGER),
+                    CAST(created_at AS TEXT)
+                FROM findings_legacy_incompatible
+                "#,
+            ),
+        )?;
+
+        self.repair_table_if_needed(
+            "telemetry",
+            &[
+                ("telemetry_id", "TEXT"),
+                ("name", "TEXT"),
+                ("target", "TEXT"),
+                ("duration_ms", "TEXT"),
+                ("metadata_json", "TEXT"),
+                ("created_at", "TEXT"),
+            ],
+            r#"
+            CREATE TABLE telemetry (
+                telemetry_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                target TEXT,
+                duration_ms TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            "#,
+            Some(
+                r#"
+                INSERT OR IGNORE INTO telemetry (
+                    telemetry_id,
+                    name,
+                    target,
+                    duration_ms,
+                    metadata_json,
+                    created_at
+                )
+                SELECT
+                    CAST(telemetry_id AS TEXT),
+                    CAST(name AS TEXT),
+                    CAST(target AS TEXT),
+                    CAST(duration_ms AS TEXT),
+                    CAST(metadata_json AS TEXT),
+                    CAST(created_at AS TEXT)
+                FROM telemetry_legacy_incompatible
+                "#,
+            ),
+        )?;
+
+        self.repair_table_if_needed(
+            "jobs",
+            &[
+                ("job_id", "TEXT"),
+                ("target", "TEXT"),
+                ("profile", "TEXT"),
+                ("interval_seconds", "INTEGER"),
+                ("enabled", "INTEGER"),
+                ("policy_path", "TEXT"),
+                ("last_run_at", "TEXT"),
+                ("created_at", "TEXT"),
+            ],
+            r#"
+            CREATE TABLE jobs (
+                job_id TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                interval_seconds INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                policy_path TEXT,
+                last_run_at TEXT,
+                created_at TEXT NOT NULL
+            )
+            "#,
+            Some(
+                r#"
+                INSERT OR IGNORE INTO jobs (
+                    job_id,
+                    target,
+                    profile,
+                    interval_seconds,
+                    enabled,
+                    policy_path,
+                    last_run_at,
+                    created_at
+                )
+                SELECT
+                    CAST(job_id AS TEXT),
+                    CAST(target AS TEXT),
+                    CAST(profile AS TEXT),
+                    CAST(interval_seconds AS INTEGER),
+                    CAST(enabled AS INTEGER),
+                    CAST(policy_path AS TEXT),
+                    CAST(last_run_at AS TEXT),
+                    CAST(created_at AS TEXT)
+                FROM jobs_legacy_incompatible
+                "#,
+            ),
+        )?;
+
+        self.repair_table_if_needed(
+            "baseline_entries",
+            &[("resource", "TEXT"), ("created_at", "TEXT")],
+            r#"
+            CREATE TABLE baseline_entries (
+                resource TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL
+            )
+            "#,
+            Some(
+                r#"
+                INSERT OR IGNORE INTO baseline_entries (
+                    resource,
+                    created_at
+                )
+                SELECT
+                    CAST(resource AS TEXT),
+                    CAST(created_at AS TEXT)
+                FROM baseline_entries_legacy_incompatible
+                "#,
+            ),
+        )?;
+
+        self.repair_table_if_needed(
+            "episodes",
+            &[
+                ("episode_id", "TEXT"),
+                ("target", "TEXT"),
+                ("title", "TEXT"),
+                ("kind", "TEXT"),
+                ("severity", "TEXT"),
+                ("criticality", "TEXT"),
+                ("score", "INTEGER"),
+                ("state", "TEXT"),
+                ("resource_count", "INTEGER"),
+                ("resources_json", "TEXT"),
+                ("cluster_ids_json", "TEXT"),
+                ("started_at", "TEXT"),
+                ("ended_at", "TEXT"),
+                ("summary", "TEXT"),
+                ("explanation_json", "TEXT"),
+                ("created_at", "TEXT"),
+            ],
+            r#"
+            CREATE TABLE episodes (
+                episode_id TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                title TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                criticality TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                resource_count INTEGER NOT NULL,
+                resources_json TEXT NOT NULL,
+                cluster_ids_json TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                explanation_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            "#,
+            Some(
+                r#"
+                INSERT OR IGNORE INTO episodes (
+                    episode_id,
+                    target,
+                    title,
+                    kind,
+                    severity,
+                    criticality,
+                    score,
+                    state,
+                    resource_count,
+                    resources_json,
+                    cluster_ids_json,
+                    started_at,
+                    ended_at,
+                    summary,
+                    explanation_json,
+                    created_at
+                )
+                SELECT
+                    CAST(episode_id AS TEXT),
+                    CAST(target AS TEXT),
+                    CAST(title AS TEXT),
+                    CAST(kind AS TEXT),
+                    CAST(severity AS TEXT),
+                    CAST(criticality AS TEXT),
+                    CAST(score AS INTEGER),
+                    CAST(state AS TEXT),
+                    CAST(resource_count AS INTEGER),
+                    CAST(resources_json AS TEXT),
+                    CAST(cluster_ids_json AS TEXT),
+                    CAST(started_at AS TEXT),
+                    CAST(ended_at AS TEXT),
+                    CAST(summary AS TEXT),
+                    CAST(explanation_json AS TEXT),
+                    CAST(created_at AS TEXT)
+                FROM episodes_legacy_incompatible
+                "#,
+            ),
+        )?;
+
+        self.repair_table_if_needed(
+            "graphs",
+            &[
+                ("graph_id", "TEXT"),
+                ("target", "TEXT"),
+                ("node_count", "INTEGER"),
+                ("edge_count", "INTEGER"),
+                ("generated_at", "TEXT"),
+                ("summary_json", "TEXT"),
+                ("created_at", "TEXT"),
+            ],
+            r#"
+            CREATE TABLE graphs (
+                graph_id TEXT PRIMARY KEY,
+                target TEXT NOT NULL,
+                node_count INTEGER NOT NULL,
+                edge_count INTEGER NOT NULL,
+                generated_at TEXT NOT NULL,
+                summary_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            "#,
+            Some(
+                r#"
+                INSERT OR IGNORE INTO graphs (
+                    graph_id,
+                    target,
+                    node_count,
+                    edge_count,
+                    generated_at,
+                    summary_json,
+                    created_at
+                )
+                SELECT
+                    CAST(graph_id AS TEXT),
+                    CAST(target AS TEXT),
+                    CAST(node_count AS INTEGER),
+                    CAST(edge_count AS INTEGER),
+                    CAST(generated_at AS TEXT),
+                    CAST(summary_json AS TEXT),
+                    CAST(created_at AS TEXT)
+                FROM graphs_legacy_incompatible
+                "#,
+            ),
+        )?;
+
+        self.repair_table_if_needed(
+            "graph_nodes",
+            &[
+                ("graph_id", "TEXT"),
+                ("node_id", "TEXT"),
+                ("target", "TEXT"),
+                ("kind", "TEXT"),
+                ("label", "TEXT"),
+                ("first_seen", "TEXT"),
+                ("last_seen", "TEXT"),
+                ("attributes_json", "TEXT"),
+            ],
+            r#"
+            CREATE TABLE graph_nodes (
+                graph_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                target TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                label TEXT NOT NULL,
+                first_seen TEXT,
+                last_seen TEXT,
+                attributes_json TEXT NOT NULL,
+                PRIMARY KEY (graph_id, node_id)
+            )
+            "#,
+            Some(
+                r#"
+                INSERT OR IGNORE INTO graph_nodes (
+                    graph_id,
+                    node_id,
+                    target,
+                    kind,
+                    label,
+                    first_seen,
+                    last_seen,
+                    attributes_json
+                )
+                SELECT
+                    CAST(graph_id AS TEXT),
+                    CAST(node_id AS TEXT),
+                    CAST(target AS TEXT),
+                    CAST(kind AS TEXT),
+                    CAST(label AS TEXT),
+                    CAST(first_seen AS TEXT),
+                    CAST(last_seen AS TEXT),
+                    CAST(attributes_json AS TEXT)
+                FROM graph_nodes_legacy_incompatible
+                "#,
+            ),
+        )?;
+
+        self.repair_table_if_needed(
+            "graph_edges",
+            &[
+                ("graph_id", "TEXT"),
+                ("edge_id", "TEXT"),
+                ("target", "TEXT"),
+                ("from_node", "TEXT"),
+                ("to_node", "TEXT"),
+                ("kind", "TEXT"),
+                ("weight", "INTEGER"),
+                ("first_seen", "TEXT"),
+                ("last_seen", "TEXT"),
+                ("attributes_json", "TEXT"),
+            ],
+            r#"
+            CREATE TABLE graph_edges (
+                graph_id TEXT NOT NULL,
+                edge_id TEXT NOT NULL,
+                target TEXT NOT NULL,
+                from_node TEXT NOT NULL,
+                to_node TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                weight INTEGER NOT NULL,
+                first_seen TEXT,
+                last_seen TEXT,
+                attributes_json TEXT NOT NULL,
+                PRIMARY KEY (graph_id, edge_id)
+            )
+            "#,
+            Some(
+                r#"
+                INSERT OR IGNORE INTO graph_edges (
+                    graph_id,
+                    edge_id,
+                    target,
+                    from_node,
+                    to_node,
+                    kind,
+                    weight,
+                    first_seen,
+                    last_seen,
+                    attributes_json
+                )
+                SELECT
+                    CAST(graph_id AS TEXT),
+                    CAST(edge_id AS TEXT),
+                    CAST(target AS TEXT),
+                    CAST(from_node AS TEXT),
+                    CAST(to_node AS TEXT),
+                    CAST(kind AS TEXT),
+                    CAST(weight AS INTEGER),
+                    CAST(first_seen AS TEXT),
+                    CAST(last_seen AS TEXT),
+                    CAST(attributes_json AS TEXT)
+                FROM graph_edges_legacy_incompatible
+                "#,
+            ),
+        )?;
+
+        Ok(())
+    }
+
+    fn repair_table_if_needed(
+        &self,
+        table: &str,
+        expected: &[(&str, &str)],
+        create_sql: &str,
+        migrate_sql: Option<&str>,
+    ) -> Result<()> {
+        let columns = self.read_table_info(table)?;
         if columns.is_empty() {
             return Ok(());
         }
-
-        let expected = [
-            ("snapshot_id", "TEXT"),
-            ("target", "TEXT"),
-            ("timestamp", "TEXT"),
-            ("snapshot_version", "INTEGER"),
-            ("file_hash", "TEXT"),
-            ("path", "TEXT"),
-            ("created_at", "TEXT"),
-        ];
 
         let compatible = expected.iter().all(|(name, expected_type)| {
             columns.iter().any(|column| {
@@ -1215,22 +1747,17 @@ impl AtlasStore {
             return Ok(());
         }
 
-        self.conn.execute_batch(
-            r#"
-            DROP TABLE IF EXISTS snapshots_legacy_incompatible;
-            ALTER TABLE snapshots RENAME TO snapshots_legacy_incompatible;
+        let legacy_name = format!("{table}_legacy_incompatible");
+        let drop_legacy = format!("DROP TABLE IF EXISTS {legacy_name};");
+        let rename_sql = format!("ALTER TABLE {table} RENAME TO {legacy_name};");
 
-            CREATE TABLE snapshots (
-                snapshot_id TEXT PRIMARY KEY,
-                target TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                snapshot_version INTEGER NOT NULL,
-                file_hash TEXT NOT NULL,
-                path TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            "#,
-        )?;
+        self.conn.execute_batch(&drop_legacy)?;
+        self.conn.execute_batch(&rename_sql)?;
+        self.conn.execute_batch(create_sql)?;
+
+        if let Some(migrate_sql) = migrate_sql {
+            let _ = self.conn.execute_batch(migrate_sql);
+        }
 
         Ok(())
     }
@@ -1265,11 +1792,7 @@ fn parse_datetime(value: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&value)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                value.len(),
-                rusqlite::types::Type::Text,
-                Box::new(e),
-            )
+            rusqlite::Error::FromSqlConversionFailure(value.len(), Type::Text, Box::new(e))
         })
 }
 
@@ -1286,12 +1809,75 @@ fn escape_csv(input: &str) -> String {
 fn to_sql_err(err: anyhow::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         0,
-        rusqlite::types::Type::Text,
+        Type::Text,
         Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             err.to_string(),
         )),
     )
+}
+
+fn row_string(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<String> {
+    match row.get_ref(idx)? {
+        ValueRef::Null => Ok(String::new()),
+        ValueRef::Text(v) => Ok(String::from_utf8_lossy(v).to_string()),
+        ValueRef::Integer(v) => Ok(v.to_string()),
+        ValueRef::Real(v) => Ok(v.to_string()),
+        ValueRef::Blob(v) => Ok(String::from_utf8_lossy(v).to_string()),
+    }
+}
+
+fn row_optional_string(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
+    match row.get_ref(idx)? {
+        ValueRef::Null => Ok(None),
+        ValueRef::Text(v) => Ok(Some(String::from_utf8_lossy(v).to_string())),
+        ValueRef::Integer(v) => Ok(Some(v.to_string())),
+        ValueRef::Real(v) => Ok(Some(v.to_string())),
+        ValueRef::Blob(v) => Ok(Some(String::from_utf8_lossy(v).to_string())),
+    }
+}
+
+fn row_u32(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<u32> {
+    match row.get_ref(idx)? {
+        ValueRef::Null => Ok(0),
+        ValueRef::Integer(v) => Ok(v.max(0) as u32),
+        ValueRef::Real(v) => Ok(v.max(0.0) as u32),
+        ValueRef::Text(v) => Ok(String::from_utf8_lossy(v).parse::<u32>().unwrap_or(0)),
+        ValueRef::Blob(_) => Ok(0),
+    }
+}
+
+fn row_u64(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<u64> {
+    match row.get_ref(idx)? {
+        ValueRef::Null => Ok(0),
+        ValueRef::Integer(v) => Ok(v.max(0) as u64),
+        ValueRef::Real(v) => Ok(v.max(0.0) as u64),
+        ValueRef::Text(v) => Ok(String::from_utf8_lossy(v).parse::<u64>().unwrap_or(0)),
+        ValueRef::Blob(_) => Ok(0),
+    }
+}
+
+fn row_usize(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<usize> {
+    match row.get_ref(idx)? {
+        ValueRef::Null => Ok(0),
+        ValueRef::Integer(v) => Ok(v.max(0) as usize),
+        ValueRef::Real(v) => Ok(v.max(0.0) as usize),
+        ValueRef::Text(v) => Ok(String::from_utf8_lossy(v).parse::<usize>().unwrap_or(0)),
+        ValueRef::Blob(_) => Ok(0),
+    }
+}
+
+fn row_bool(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<bool> {
+    match row.get_ref(idx)? {
+        ValueRef::Null => Ok(false),
+        ValueRef::Integer(v) => Ok(v != 0),
+        ValueRef::Real(v) => Ok(v != 0.0),
+        ValueRef::Text(v) => {
+            let s = String::from_utf8_lossy(v).to_ascii_lowercase();
+            Ok(matches!(s.as_str(), "1" | "true" | "yes"))
+        }
+        ValueRef::Blob(_) => Ok(false),
+    }
 }
 
 #[cfg(test)]
