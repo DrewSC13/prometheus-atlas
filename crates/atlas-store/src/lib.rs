@@ -5,11 +5,7 @@ use atlas_graph::{EdgeKind, ExposureGraph, GraphEdge, GraphNode, NodeKind};
 use atlas_jobs::AtlasJob;
 use atlas_snapshot::Snapshot;
 use chrono::{DateTime, Utc};
-use rusqlite::{
-    params,
-    types::{Type, ValueRef},
-    Connection,
-};
+use rusqlite::{params, types::ValueRef, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -120,6 +116,14 @@ pub struct StoredGraphRecord {
     pub generated_at: String,
     pub summary_json: String,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredSavedQuery {
+    pub name: String,
+    pub expression: String,
+    pub created_at: String,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone)]
@@ -272,10 +276,17 @@ impl AtlasStore {
                 attributes_json TEXT NOT NULL,
                 PRIMARY KEY (graph_id, edge_id)
             );
+
+            CREATE TABLE IF NOT EXISTS saved_queries (
+                name TEXT PRIMARY KEY,
+                expression TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             "#,
         )?;
 
-        self.repair_all_legacy_tables_if_needed()?;
+        self.repair_legacy_tables_if_needed()?;
         Ok(())
     }
 
@@ -357,7 +368,7 @@ impl AtlasStore {
                 older_snapshot.display().to_string(),
                 newer_snapshot.display().to_string(),
                 policy_path.map(|p| p.display().to_string()),
-                report.findings.len() + report.suppressed_findings.len(),
+                report.findings.len(),
                 report.summary.total_score,
                 report.summary.overall_severity.to_string(),
                 now,
@@ -452,8 +463,8 @@ impl AtlasStore {
                 older_snapshot_path: row_string(row, 2)?,
                 newer_snapshot_path: row_string(row, 3)?,
                 policy_path: row_optional_string(row, 4)?,
-                total_findings: row_usize(row, 5)?,
-                total_score: row_u32(row, 6)?,
+                total_findings: row_u64(row, 5)? as usize,
+                total_score: row_u64(row, 6)? as u32,
                 overall_severity: row_string(row, 7)?,
                 created_at: row_string(row, 8)?,
             })
@@ -510,7 +521,7 @@ impl AtlasStore {
                 asset_type: row_string(row, 8)?,
                 environment: row_string(row, 9)?,
                 criticality: row_string(row, 10)?,
-                score: row_u32(row, 11)?,
+                score: row_u64(row, 11)? as u32,
                 tags_json: row_string(row, 12)?,
                 description: row_string(row, 13)?,
                 is_suppressed: row_bool(row, 14)?,
@@ -556,7 +567,7 @@ impl AtlasStore {
                 snapshot_id: row_string(row, 0)?,
                 target: row_string(row, 1)?,
                 timestamp: row_string(row, 2)?,
-                snapshot_version: row_u32(row, 3)?,
+                snapshot_version: row_u64(row, 3)? as u32,
                 file_hash: row_string(row, 4)?,
                 path: row_string(row, 5)?,
                 created_at: row_string(row, 6)?,
@@ -715,15 +726,20 @@ impl AtlasStore {
         )?;
 
         let rows = stmt.query_map([], |row| {
+            let enabled_value = row_bool(row, 4)?;
+            let policy_path = row_optional_string(row, 5)?;
+            let last_run_at = row_optional_string(row, 6)?;
+            let created_at = row_string(row, 7)?;
+
             Ok(AtlasJob {
                 job_id: row_string(row, 0)?,
                 target: row_string(row, 1)?,
                 profile: row_string(row, 2)?,
-                interval_seconds: row_u64(row, 3)?,
-                enabled: row_bool(row, 4)?,
-                policy_path: row_optional_string(row, 5)?,
-                last_run_at: parse_optional_datetime(row_optional_string(row, 6)?),
-                created_at: parse_datetime(row_string(row, 7)?)?,
+                interval_seconds: row_u64(row, 3)? as u64,
+                enabled: enabled_value,
+                policy_path,
+                last_run_at: parse_optional_datetime(last_run_at),
+                created_at: parse_datetime(created_at)?,
             })
         })?;
 
@@ -902,9 +918,9 @@ impl AtlasStore {
                 kind: row_string(row, 3)?,
                 severity: row_string(row, 4)?,
                 criticality: row_string(row, 5)?,
-                score: row_u32(row, 6)?,
+                score: row_u64(row, 6)? as u32,
                 state: row_string(row, 7)?,
-                resource_count: row_usize(row, 8)?,
+                resource_count: row_u64(row, 8)? as usize,
                 resources_json: row_string(row, 9)?,
                 cluster_ids_json: row_string(row, 10)?,
                 started_at: row_string(row, 11)?,
@@ -1053,8 +1069,8 @@ impl AtlasStore {
             Ok(StoredGraphRecord {
                 graph_id: row_string(row, 0)?,
                 target: row_string(row, 1)?,
-                node_count: row_usize(row, 2)?,
-                edge_count: row_usize(row, 3)?,
+                node_count: row_u64(row, 2)? as usize,
+                edge_count: row_u64(row, 3)? as usize,
                 generated_at: row_string(row, 4)?,
                 summary_json: row_string(row, 5)?,
                 created_at: row_string(row, 6)?,
@@ -1154,7 +1170,7 @@ impl AtlasStore {
                 from: row_string(row, 2)?,
                 to: row_string(row, 3)?,
                 kind: EdgeKind::from_str(&kind_str).map_err(to_sql_err)?,
-                weight: row_u32(row, 5)?,
+                weight: row_u64(row, 5)? as u32,
                 first_seen: parse_optional_datetime(row_optional_string(row, 6)?),
                 last_seen: parse_optional_datetime(row_optional_string(row, 7)?),
                 attributes: attrs,
@@ -1181,7 +1197,99 @@ impl AtlasStore {
         Ok(Some(graph))
     }
 
-    fn repair_all_legacy_tables_if_needed(&self) -> Result<()> {
+    pub fn save_saved_query(&self, name: &str, expression: &str) -> Result<()> {
+        let now = Utc::now().to_rfc3339();
+
+        self.conn.execute(
+            r#"
+            INSERT INTO saved_queries (
+                name,
+                expression,
+                created_at,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(name) DO UPDATE SET
+                expression = excluded.expression,
+                updated_at = excluded.updated_at
+            "#,
+            params![name, expression, now, now],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn list_saved_queries(&self) -> Result<Vec<StoredSavedQuery>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                name,
+                expression,
+                created_at,
+                updated_at
+            FROM saved_queries
+            ORDER BY name ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(StoredSavedQuery {
+                name: row_string(row, 0)?,
+                expression: row_string(row, 1)?,
+                created_at: row_string(row, 2)?,
+                updated_at: row_string(row, 3)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+
+        Ok(items)
+    }
+
+    pub fn load_saved_query(&self, name: &str) -> Result<Option<StoredSavedQuery>> {
+        let result = self.conn.query_row(
+            r#"
+            SELECT
+                name,
+                expression,
+                created_at,
+                updated_at
+            FROM saved_queries
+            WHERE name = ?1
+            "#,
+            [name],
+            |row| {
+                Ok(StoredSavedQuery {
+                    name: row_string(row, 0)?,
+                    expression: row_string(row, 1)?,
+                    created_at: row_string(row, 2)?,
+                    updated_at: row_string(row, 3)?,
+                })
+            },
+        );
+
+        match result {
+            Ok(item) => Ok(Some(item)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn delete_saved_query(&self, name: &str) -> Result<()> {
+        self.conn.execute(
+            r#"
+            DELETE FROM saved_queries
+            WHERE name = ?1
+            "#,
+            [name],
+        )?;
+
+        Ok(())
+    }
+
+    fn repair_legacy_tables_if_needed(&self) -> Result<()> {
         self.repair_table_if_needed(
             "snapshots",
             &[
@@ -1345,7 +1453,7 @@ impl AtlasStore {
                 )
                 SELECT
                     CAST(finding_id AS TEXT),
-                    CAST(COALESCE(run_id, '') AS TEXT),
+                    CAST(run_id AS TEXT),
                     CAST(target AS TEXT),
                     CAST(severity AS TEXT),
                     CAST(state AS TEXT),
@@ -1358,7 +1466,7 @@ impl AtlasStore {
                     CAST(score AS INTEGER),
                     CAST(tags_json AS TEXT),
                     CAST(description AS TEXT),
-                    CAST(COALESCE(is_suppressed, 0) AS INTEGER),
+                    CAST(is_suppressed AS INTEGER),
                     CAST(created_at AS TEXT)
                 FROM findings_legacy_incompatible
                 "#,
@@ -1718,6 +1826,40 @@ impl AtlasStore {
             ),
         )?;
 
+        self.repair_table_if_needed(
+            "saved_queries",
+            &[
+                ("name", "TEXT"),
+                ("expression", "TEXT"),
+                ("created_at", "TEXT"),
+                ("updated_at", "TEXT"),
+            ],
+            r#"
+            CREATE TABLE saved_queries (
+                name TEXT PRIMARY KEY,
+                expression TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            "#,
+            Some(
+                r#"
+                INSERT OR IGNORE INTO saved_queries (
+                    name,
+                    expression,
+                    created_at,
+                    updated_at
+                )
+                SELECT
+                    CAST(name AS TEXT),
+                    CAST(expression AS TEXT),
+                    CAST(created_at AS TEXT),
+                    CAST(updated_at AS TEXT)
+                FROM saved_queries_legacy_incompatible
+                "#,
+            ),
+        )?;
+
         Ok(())
     }
 
@@ -1726,7 +1868,7 @@ impl AtlasStore {
         table: &str,
         expected: &[(&str, &str)],
         create_sql: &str,
-        migrate_sql: Option<&str>,
+        copy_sql: Option<&str>,
     ) -> Result<()> {
         let columns = self.read_table_info(table)?;
         if columns.is_empty() {
@@ -1747,16 +1889,15 @@ impl AtlasStore {
             return Ok(());
         }
 
-        let legacy_name = format!("{table}_legacy_incompatible");
-        let drop_legacy = format!("DROP TABLE IF EXISTS {legacy_name};");
-        let rename_sql = format!("ALTER TABLE {table} RENAME TO {legacy_name};");
-
-        self.conn.execute_batch(&drop_legacy)?;
-        self.conn.execute_batch(&rename_sql)?;
+        let legacy = format!("{table}_legacy_incompatible");
+        self.conn
+            .execute_batch(&format!("DROP TABLE IF EXISTS {legacy};"))?;
+        self.conn
+            .execute_batch(&format!("ALTER TABLE {table} RENAME TO {legacy};"))?;
         self.conn.execute_batch(create_sql)?;
 
-        if let Some(migrate_sql) = migrate_sql {
-            let _ = self.conn.execute_batch(migrate_sql);
+        if let Some(copy_sql) = copy_sql {
+            self.conn.execute_batch(copy_sql)?;
         }
 
         Ok(())
@@ -1792,7 +1933,11 @@ fn parse_datetime(value: String) -> rusqlite::Result<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(&value)
         .map(|dt| dt.with_timezone(&Utc))
         .map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(value.len(), Type::Text, Box::new(e))
+            rusqlite::Error::FromSqlConversionFailure(
+                value.len(),
+                rusqlite::types::Type::Text,
+                Box::new(e),
+            )
         })
 }
 
@@ -1809,7 +1954,7 @@ fn escape_csv(input: &str) -> String {
 fn to_sql_err(err: anyhow::Error) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         0,
-        Type::Text,
+        rusqlite::types::Type::Text,
         Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             err.to_string(),
@@ -1817,64 +1962,44 @@ fn to_sql_err(err: anyhow::Error) -> rusqlite::Error {
     )
 }
 
-fn row_string(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<String> {
-    match row.get_ref(idx)? {
+fn row_string(row: &Row<'_>, index: usize) -> rusqlite::Result<String> {
+    match row.get_ref(index)? {
         ValueRef::Null => Ok(String::new()),
-        ValueRef::Text(v) => Ok(String::from_utf8_lossy(v).to_string()),
-        ValueRef::Integer(v) => Ok(v.to_string()),
-        ValueRef::Real(v) => Ok(v.to_string()),
-        ValueRef::Blob(v) => Ok(String::from_utf8_lossy(v).to_string()),
+        ValueRef::Text(value) => Ok(String::from_utf8_lossy(value).to_string()),
+        ValueRef::Integer(value) => Ok(value.to_string()),
+        ValueRef::Real(value) => Ok(value.to_string()),
+        ValueRef::Blob(value) => Ok(String::from_utf8_lossy(value).to_string()),
     }
 }
 
-fn row_optional_string(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<Option<String>> {
-    match row.get_ref(idx)? {
+fn row_optional_string(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<String>> {
+    match row.get_ref(index)? {
         ValueRef::Null => Ok(None),
-        ValueRef::Text(v) => Ok(Some(String::from_utf8_lossy(v).to_string())),
-        ValueRef::Integer(v) => Ok(Some(v.to_string())),
-        ValueRef::Real(v) => Ok(Some(v.to_string())),
-        ValueRef::Blob(v) => Ok(Some(String::from_utf8_lossy(v).to_string())),
+        ValueRef::Text(value) => Ok(Some(String::from_utf8_lossy(value).to_string())),
+        ValueRef::Integer(value) => Ok(Some(value.to_string())),
+        ValueRef::Real(value) => Ok(Some(value.to_string())),
+        ValueRef::Blob(value) => Ok(Some(String::from_utf8_lossy(value).to_string())),
     }
 }
 
-fn row_u32(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<u32> {
-    match row.get_ref(idx)? {
+fn row_u64(row: &Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    match row.get_ref(index)? {
         ValueRef::Null => Ok(0),
-        ValueRef::Integer(v) => Ok(v.max(0) as u32),
-        ValueRef::Real(v) => Ok(v.max(0.0) as u32),
-        ValueRef::Text(v) => Ok(String::from_utf8_lossy(v).parse::<u32>().unwrap_or(0)),
+        ValueRef::Integer(value) => Ok(value.max(0) as u64),
+        ValueRef::Real(value) => Ok(value.max(0.0) as u64),
+        ValueRef::Text(value) => Ok(String::from_utf8_lossy(value).parse::<u64>().unwrap_or(0)),
         ValueRef::Blob(_) => Ok(0),
     }
 }
 
-fn row_u64(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<u64> {
-    match row.get_ref(idx)? {
-        ValueRef::Null => Ok(0),
-        ValueRef::Integer(v) => Ok(v.max(0) as u64),
-        ValueRef::Real(v) => Ok(v.max(0.0) as u64),
-        ValueRef::Text(v) => Ok(String::from_utf8_lossy(v).parse::<u64>().unwrap_or(0)),
-        ValueRef::Blob(_) => Ok(0),
-    }
-}
-
-fn row_usize(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<usize> {
-    match row.get_ref(idx)? {
-        ValueRef::Null => Ok(0),
-        ValueRef::Integer(v) => Ok(v.max(0) as usize),
-        ValueRef::Real(v) => Ok(v.max(0.0) as usize),
-        ValueRef::Text(v) => Ok(String::from_utf8_lossy(v).parse::<usize>().unwrap_or(0)),
-        ValueRef::Blob(_) => Ok(0),
-    }
-}
-
-fn row_bool(row: &rusqlite::Row<'_>, idx: usize) -> rusqlite::Result<bool> {
-    match row.get_ref(idx)? {
+fn row_bool(row: &Row<'_>, index: usize) -> rusqlite::Result<bool> {
+    match row.get_ref(index)? {
         ValueRef::Null => Ok(false),
-        ValueRef::Integer(v) => Ok(v != 0),
-        ValueRef::Real(v) => Ok(v != 0.0),
-        ValueRef::Text(v) => {
-            let s = String::from_utf8_lossy(v).to_ascii_lowercase();
-            Ok(matches!(s.as_str(), "1" | "true" | "yes"))
+        ValueRef::Integer(value) => Ok(value != 0),
+        ValueRef::Real(value) => Ok(value != 0.0),
+        ValueRef::Text(value) => {
+            let raw = String::from_utf8_lossy(value).to_ascii_lowercase();
+            Ok(matches!(raw.as_str(), "1" | "true" | "yes"))
         }
         ValueRef::Blob(_) => Ok(false),
     }
@@ -1924,5 +2049,30 @@ mod tests {
 
         assert_eq!(loaded.target, "example.com");
         assert!(loaded.node_count >= 1);
+    }
+
+    #[test]
+    fn stores_and_loads_saved_query() {
+        let db_path = std::env::temp_dir().join(format!(
+            "atlas-store-saved-query-test-{}.db",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+
+        let store = AtlasStore::open(&db_path).unwrap();
+        store.initialize().unwrap();
+
+        store
+            .save_saved_query("risky-admin", "services label~admin")
+            .unwrap();
+
+        let item = store.load_saved_query("risky-admin").unwrap().unwrap();
+        assert_eq!(item.name, "risky-admin");
+        assert_eq!(item.expression, "services label~admin");
+
+        let list = store.list_saved_queries().unwrap();
+        assert_eq!(list.len(), 1);
+
+        store.delete_saved_query("risky-admin").unwrap();
+        assert!(store.load_saved_query("risky-admin").unwrap().is_none());
     }
 }

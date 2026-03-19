@@ -2,7 +2,7 @@ use atlas_graph::NodeKind;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::query::SortSpec;
+use crate::query::{QueryMode, SortSpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryMatch {
@@ -20,12 +20,16 @@ pub struct QuerySummary {
     pub returned_matches: usize,
     pub max_degree: usize,
     pub kind_counts: BTreeMap<String, usize>,
+    pub seed_matches: usize,
+    pub expanded_matches: usize,
+    pub path_found: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
     pub target: String,
     pub raw_query: String,
+    pub mode: QueryMode,
     pub matched_nodes: Vec<QueryMatch>,
     pub summary: QuerySummary,
     pub limit: usize,

@@ -1,8 +1,8 @@
 use anyhow::{anyhow, bail, Result};
 
 use crate::query::{
-    Comparator, QueryClause, QueryExpr, QueryField, QueryPreset, QueryRequest, SortDirection,
-    SortField, SortSpec,
+    Comparator, QueryClause, QueryExpr, QueryField, QueryMode, QueryPreset, QueryRequest,
+    SortDirection, SortField, SortSpec,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +90,37 @@ pub fn parse_query(input: &str, default_limit: usize) -> Result<QueryRequest> {
         explain = true;
     }
 
+    if parser.peek_word_ci("PATH") {
+        parser.next();
+        let path_from = parser.next_stringish()?;
+        let arrow = parser.next_word_value()?;
+        if arrow != "->" {
+            bail!("PATH requiere sintaxis: PATH <from> -> <to>");
+        }
+        let path_to = parser.next_stringish()?;
+
+        return Ok(QueryRequest {
+            raw,
+            mode: QueryMode::Path,
+            preset: None,
+            expr: None,
+            limit: default_limit,
+            offset: 0,
+            sort: None,
+            explain,
+            expand_depth: 0,
+            neighbors_depth: 0,
+            path_from: Some(path_from),
+            path_to: Some(path_to),
+        });
+    }
+
+    let mut mode = QueryMode::Filter;
+    if parser.peek_word_ci("NEIGHBORS") {
+        parser.next();
+        mode = QueryMode::Neighbors;
+    }
+
     let mut preset = None;
     if let Some(Token::Word(word)) = parser.peek() {
         if let Some(found) = parse_preset(word) {
@@ -107,6 +138,8 @@ pub fn parse_query(input: &str, default_limit: usize) -> Result<QueryRequest> {
     let mut sort = None;
     let mut limit = default_limit;
     let mut offset = 0usize;
+    let mut expand_depth = 0usize;
+    let mut neighbors_depth = 1usize;
 
     while !parser.is_eof() {
         if parser.peek_word_ci("ORDER") {
@@ -144,6 +177,24 @@ pub fn parse_query(input: &str, default_limit: usize) -> Result<QueryRequest> {
             continue;
         }
 
+        if parser.peek_word_ci("EXPAND") {
+            parser.next();
+            let value = parser.next_word_value()?;
+            expand_depth = value
+                .parse::<usize>()
+                .map_err(|_| anyhow!("EXPAND debe ser numérico"))?;
+            continue;
+        }
+
+        if parser.peek_word_ci("DEPTH") {
+            parser.next();
+            let value = parser.next_word_value()?;
+            neighbors_depth = value
+                .parse::<usize>()
+                .map_err(|_| anyhow!("DEPTH debe ser numérico"))?;
+            continue;
+        }
+
         if parser.peek_word_ci("EXPLAIN") {
             parser.next();
             explain = true;
@@ -158,12 +209,17 @@ pub fn parse_query(input: &str, default_limit: usize) -> Result<QueryRequest> {
 
     Ok(QueryRequest {
         raw,
+        mode,
         preset,
         expr,
         limit,
         offset,
         sort,
         explain,
+        expand_depth,
+        neighbors_depth,
+        path_from: None,
+        path_to: None,
     })
 }
 
@@ -460,6 +516,8 @@ fn is_directive_token(token: Option<&Token>) -> bool {
                 || word.eq_ignore_ascii_case("LIMIT")
                 || word.eq_ignore_ascii_case("OFFSET")
                 || word.eq_ignore_ascii_case("EXPLAIN")
+                || word.eq_ignore_ascii_case("EXPAND")
+                || word.eq_ignore_ascii_case("DEPTH")
     )
 }
 
@@ -490,11 +548,14 @@ fn display_owned_token(token: Option<Token>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::query::{Comparator, QueryExpr, QueryField, QueryPreset, SortDirection, SortField};
+    use crate::query::{
+        Comparator, QueryExpr, QueryField, QueryMode, QueryPreset, SortDirection, SortField,
+    };
 
     #[test]
     fn parses_preset_only() {
         let query = parse_query("services", 25).unwrap();
+        assert_eq!(query.mode, QueryMode::Filter);
         assert_eq!(query.preset, Some(QueryPreset::Services));
         assert!(query.expr.is_none());
         assert_eq!(query.limit, 25);
@@ -512,9 +573,7 @@ mod tests {
 
         assert_eq!(query.preset, Some(QueryPreset::Services));
         match query.expr {
-            Some(QueryExpr::And(items)) => {
-                assert_eq!(items.len(), 2);
-            }
+            Some(QueryExpr::And(items)) => assert_eq!(items.len(), 2),
             other => panic!("expr inesperada: {other:?}"),
         }
     }
@@ -560,5 +619,27 @@ mod tests {
             }
             other => panic!("expr inesperada: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_expand_directive() {
+        let query = parse_query(r#"services technology=cloudflare EXPAND 2"#, 20).unwrap();
+        assert_eq!(query.expand_depth, 2);
+        assert_eq!(query.mode, QueryMode::Filter);
+    }
+
+    #[test]
+    fn parses_neighbors_mode() {
+        let query = parse_query(r#"NEIGHBORS label=example.com DEPTH 3"#, 20).unwrap();
+        assert_eq!(query.mode, QueryMode::Neighbors);
+        assert_eq!(query.neighbors_depth, 3);
+    }
+
+    #[test]
+    fn parses_path_mode() {
+        let query = parse_query(r#"PATH example.com -> cloudflare"#, 20).unwrap();
+        assert_eq!(query.mode, QueryMode::Path);
+        assert_eq!(query.path_from.as_deref(), Some("example.com"));
+        assert_eq!(query.path_to.as_deref(), Some("cloudflare"));
     }
 }

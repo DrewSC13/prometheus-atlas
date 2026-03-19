@@ -180,6 +180,31 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    QuerySave {
+        name: String,
+        expression: String,
+    },
+
+    QueryList,
+
+    QueryRun {
+        name: String,
+        target: String,
+
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    QueryDelete {
+        name: String,
+    },
+
     History {
         target: String,
     },
@@ -630,7 +655,9 @@ async fn main() -> Result<()> {
             store.initialize()?;
             let graph = require_latest_graph(&store, &target)?;
 
-            let query = parse_query(&expression, limit)?;
+            let mut query = parse_query(&expression, limit)?;
+            query.limit = limit;
+
             let result = execute_query(&graph, &query)?;
 
             if want_json {
@@ -650,6 +677,76 @@ async fn main() -> Result<()> {
                     "matches": result.summary.total_matches
                 }),
             )?;
+        }
+
+        Commands::QuerySave { name, expression } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            store.save_saved_query(&name, &expression)?;
+            println!("Query guardada: {name}");
+        }
+
+        Commands::QueryList => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let queries = store.list_saved_queries()?;
+
+            if queries.is_empty() {
+                println!("No hay queries guardadas.");
+            } else {
+                println!("Queries guardadas:");
+                for item in queries {
+                    println!("- {} | {}", item.name, item.expression);
+                }
+            }
+        }
+
+        Commands::QueryRun {
+            name,
+            target,
+            limit,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let saved = store
+                .load_saved_query(&name)?
+                .ok_or_else(|| anyhow::anyhow!("no existe la query guardada: {name}"))?;
+
+            let graph = require_latest_graph(&store, &target)?;
+            let mut query = parse_query(&saved.expression, limit)?;
+            query.limit = limit;
+
+            let result = execute_query(&graph, &query)?;
+
+            if want_json {
+                atlas_output::write_json_output(&result, output.as_deref())?;
+            } else {
+                println!("Saved query: {}", saved.name);
+                atlas_output::print_human_query_result(&result);
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "query-run",
+                Some(&target),
+                started.elapsed().as_millis(),
+                json!({
+                    "saved_query": name,
+                    "matches": result.summary.total_matches
+                }),
+            )?;
+        }
+
+        Commands::QueryDelete { name } => {
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            store.delete_saved_query(&name)?;
+            println!("Query eliminada: {name}");
         }
 
         Commands::History { target } => {

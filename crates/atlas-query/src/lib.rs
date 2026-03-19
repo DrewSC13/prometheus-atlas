@@ -8,7 +8,7 @@ pub use engine::{
 };
 pub use parser::parse_query;
 pub use query::{
-    Comparator, QueryClause, QueryExpr, QueryField, QueryPreset, QueryRequest, SortDirection,
-    SortField, SortSpec,
+    Comparator, QueryClause, QueryExpr, QueryField, QueryMode, QueryPreset, QueryRequest,
+    SortDirection, SortField, SortSpec,
 };
 pub use results::{QueryMatch, QueryResult, QuerySummary};

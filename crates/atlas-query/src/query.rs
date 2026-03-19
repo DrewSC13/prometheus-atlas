@@ -169,12 +169,24 @@ pub struct SortSpec {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum QueryMode {
+    Filter,
+    Neighbors,
+    Path,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QueryRequest {
     pub raw: String,
+    pub mode: QueryMode,
     pub preset: Option<QueryPreset>,
     pub expr: Option<QueryExpr>,
     pub limit: usize,
     pub offset: usize,
     pub sort: Option<SortSpec>,
     pub explain: bool,
+    pub expand_depth: usize,
+    pub neighbors_depth: usize,
+    pub path_from: Option<String>,
+    pub path_to: Option<String>,
 }

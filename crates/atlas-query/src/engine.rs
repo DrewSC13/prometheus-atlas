@@ -2,13 +2,13 @@ use anyhow::{anyhow, Result};
 use atlas_graph::{EdgeKind, ExposureGraph, GraphNode, NodeKind};
 
 use crate::query::{
-    Comparator, QueryClause, QueryExpr, QueryField, QueryPreset, QueryRequest, SortDirection,
-    SortField,
+    Comparator, QueryClause, QueryExpr, QueryField, QueryMode, QueryPreset, QueryRequest,
+    SortDirection, SortField,
 };
 use crate::results::{QueryMatch, QueryResult, QuerySummary};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +85,8 @@ pub fn graph_search(graph: &ExposureGraph, request: &GraphSearchRequest) -> Quer
     QueryResult {
         target: graph.target.clone(),
         raw_query: "graph-search".to_string(),
-        summary: summarize_matches(&matches, matches.len()),
+        mode: QueryMode::Filter,
+        summary: summarize_matches(&matches, matches.len(), matches.len(), 0, false),
         matched_nodes: matches,
         limit: request.limit,
         offset: 0,
@@ -95,9 +96,17 @@ pub fn graph_search(graph: &ExposureGraph, request: &GraphSearchRequest) -> Quer
 }
 
 pub fn execute_query(graph: &ExposureGraph, request: &QueryRequest) -> Result<QueryResult> {
+    match request.mode {
+        QueryMode::Filter => execute_filter_query(graph, request),
+        QueryMode::Neighbors => execute_neighbors_query(graph, request),
+        QueryMode::Path => execute_path_query(graph, request),
+    }
+}
+
+fn execute_filter_query(graph: &ExposureGraph, request: &QueryRequest) -> Result<QueryResult> {
     let degree_map = build_degree_map(graph);
 
-    let mut all_matches = Vec::new();
+    let mut seeds = Vec::new();
     for node in &graph.nodes {
         if !matches_preset(node, request.preset.as_ref(), &degree_map) {
             continue;
@@ -115,7 +124,7 @@ pub fn execute_query(graph: &ExposureGraph, request: &QueryRequest) -> Result<Qu
             Vec::new()
         };
 
-        all_matches.push(QueryMatch {
+        seeds.push(QueryMatch {
             node_id: node.node_id.clone(),
             label: node.label.clone(),
             kind: node.kind.clone(),
@@ -124,6 +133,14 @@ pub fn execute_query(graph: &ExposureGraph, request: &QueryRequest) -> Result<Qu
             explanations,
         });
     }
+
+    let seed_count = seeds.len();
+
+    let mut all_matches = if request.expand_depth > 0 {
+        expand_matches(graph, &seeds, request.expand_depth, request.explain)?
+    } else {
+        seeds
+    };
 
     sort_matches(graph, &mut all_matches, request);
 
@@ -140,13 +157,308 @@ pub fn execute_query(graph: &ExposureGraph, request: &QueryRequest) -> Result<Qu
     Ok(QueryResult {
         target: graph.target.clone(),
         raw_query: request.raw.clone(),
-        summary: summarize_matches(&matched_nodes, total_matches),
+        mode: QueryMode::Filter,
+        summary: summarize_matches(
+            &matched_nodes,
+            total_matches,
+            seed_count,
+            total_matches.saturating_sub(seed_count),
+            false,
+        ),
         matched_nodes,
         limit,
         offset,
         sort: request.sort.clone(),
         explain: request.explain,
     })
+}
+
+fn execute_neighbors_query(graph: &ExposureGraph, request: &QueryRequest) -> Result<QueryResult> {
+    let degree_map = build_degree_map(graph);
+
+    let mut seeds = Vec::new();
+    for node in &graph.nodes {
+        if !matches_preset(node, request.preset.as_ref(), &degree_map) {
+            continue;
+        }
+
+        if let Some(expr) = &request.expr {
+            if !matches_expr(graph, node, expr, &degree_map)? {
+                continue;
+            }
+        }
+
+        seeds.push(node.node_id.clone());
+    }
+
+    let seed_count = seeds.len();
+    let expanded_ids = expand_ids(graph, &seeds, request.neighbors_depth, true);
+    let matches = ids_to_matches(
+        graph,
+        &degree_map,
+        &expanded_ids,
+        request.explain,
+        Some("neighbor traversal"),
+    );
+
+    let mut all_matches = matches;
+    sort_matches(graph, &mut all_matches, request);
+
+    let total_matches = all_matches.len();
+    let offset = request.offset.min(total_matches);
+    let limit = request.limit;
+
+    let matched_nodes = all_matches
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+
+    Ok(QueryResult {
+        target: graph.target.clone(),
+        raw_query: request.raw.clone(),
+        mode: QueryMode::Neighbors,
+        summary: summarize_matches(
+            &matched_nodes,
+            total_matches,
+            seed_count,
+            total_matches.saturating_sub(seed_count),
+            false,
+        ),
+        matched_nodes,
+        limit,
+        offset,
+        sort: request.sort.clone(),
+        explain: request.explain,
+    })
+}
+
+fn execute_path_query(graph: &ExposureGraph, request: &QueryRequest) -> Result<QueryResult> {
+    let from = request
+        .path_from
+        .as_deref()
+        .ok_or_else(|| anyhow!("PATH requiere origen"))?;
+    let to = request
+        .path_to
+        .as_deref()
+        .ok_or_else(|| anyhow!("PATH requiere destino"))?;
+
+    let from_id = resolve_node_id(graph, from)
+        .ok_or_else(|| anyhow!("no se encontró nodo origen para: {from}"))?;
+    let to_id = resolve_node_id(graph, to)
+        .ok_or_else(|| anyhow!("no se encontró nodo destino para: {to}"))?;
+
+    let degree_map = build_degree_map(graph);
+    let path = bfs_shortest_path(graph, &from_id, &to_id);
+
+    let mut matches = Vec::new();
+    if let Some(path_ids) = path.clone() {
+        for (position, node_id) in path_ids.iter().enumerate() {
+            if let Some(node) = graph.nodes.iter().find(|n| n.node_id == *node_id) {
+                let mut explanations = Vec::new();
+                if request.explain {
+                    explanations.push(format!("path position: {}", position));
+                    if position == 0 {
+                        explanations.push("path start".to_string());
+                    }
+                    if position + 1 == path_ids.len() {
+                        explanations.push("path end".to_string());
+                    }
+                }
+
+                matches.push(QueryMatch {
+                    node_id: node.node_id.clone(),
+                    label: node.label.clone(),
+                    kind: node.kind.clone(),
+                    degree: degree_map.get(&node.node_id).copied().unwrap_or(0),
+                    attributes: node.attributes.clone(),
+                    explanations,
+                });
+            }
+        }
+    }
+
+    Ok(QueryResult {
+        target: graph.target.clone(),
+        raw_query: request.raw.clone(),
+        mode: QueryMode::Path,
+        summary: summarize_matches(&matches, matches.len(), matches.len(), 0, path.is_some()),
+        matched_nodes: matches,
+        limit: request.limit,
+        offset: 0,
+        sort: None,
+        explain: request.explain,
+    })
+}
+
+fn expand_matches(
+    graph: &ExposureGraph,
+    seeds: &[QueryMatch],
+    depth: usize,
+    explain: bool,
+) -> Result<Vec<QueryMatch>> {
+    let degree_map = build_degree_map(graph);
+    let seed_ids = seeds.iter().map(|m| m.node_id.clone()).collect::<Vec<_>>();
+    let all_ids = expand_ids(graph, &seed_ids, depth, false);
+    Ok(ids_to_matches(
+        graph,
+        &degree_map,
+        &all_ids,
+        explain,
+        Some("expanded from seed"),
+    ))
+}
+
+fn expand_ids(
+    graph: &ExposureGraph,
+    seed_ids: &[String],
+    depth: usize,
+    exclude_seeds: bool,
+) -> Vec<String> {
+    let adjacency = build_adjacency(graph);
+    let mut visited = BTreeSet::new();
+    let mut queue = VecDeque::new();
+
+    for id in seed_ids {
+        visited.insert(id.clone());
+        queue.push_back((id.clone(), 0usize));
+    }
+
+    let mut ordered = Vec::new();
+
+    while let Some((current, current_depth)) = queue.pop_front() {
+        if !(exclude_seeds && seed_ids.iter().any(|seed| seed == &current)) {
+            ordered.push(current.clone());
+        }
+
+        if current_depth >= depth {
+            continue;
+        }
+
+        if let Some(neighbors) = adjacency.get(&current) {
+            for neighbor in neighbors {
+                if visited.insert(neighbor.clone()) {
+                    queue.push_back((neighbor.clone(), current_depth + 1));
+                }
+            }
+        }
+    }
+
+    ordered
+}
+
+fn ids_to_matches(
+    graph: &ExposureGraph,
+    degree_map: &BTreeMap<String, usize>,
+    ids: &[String],
+    explain: bool,
+    explanation: Option<&str>,
+) -> Vec<QueryMatch> {
+    let mut seen = BTreeSet::new();
+    let mut matches = Vec::new();
+
+    for id in ids {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+
+        if let Some(node) = graph.nodes.iter().find(|n| &n.node_id == id) {
+            let mut explanations = Vec::new();
+            if explain {
+                if let Some(reason) = explanation {
+                    explanations.push(reason.to_string());
+                }
+            }
+
+            matches.push(QueryMatch {
+                node_id: node.node_id.clone(),
+                label: node.label.clone(),
+                kind: node.kind.clone(),
+                degree: degree_map.get(&node.node_id).copied().unwrap_or(0),
+                attributes: node.attributes.clone(),
+                explanations,
+            });
+        }
+    }
+
+    matches
+}
+
+fn resolve_node_id(graph: &ExposureGraph, needle: &str) -> Option<String> {
+    if let Some(exact) = graph.nodes.iter().find(|n| n.node_id == needle) {
+        return Some(exact.node_id.clone());
+    }
+
+    if let Some(exact_label) = graph
+        .nodes
+        .iter()
+        .find(|n| n.label.eq_ignore_ascii_case(needle))
+    {
+        return Some(exact_label.node_id.clone());
+    }
+
+    graph
+        .nodes
+        .iter()
+        .find(|n| {
+            n.label
+                .to_ascii_lowercase()
+                .contains(&needle.to_ascii_lowercase())
+        })
+        .map(|n| n.node_id.clone())
+}
+
+fn bfs_shortest_path(graph: &ExposureGraph, from: &str, to: &str) -> Option<Vec<String>> {
+    let adjacency = build_adjacency(graph);
+    let mut queue = VecDeque::new();
+    let mut visited = BTreeSet::new();
+    let mut parent: BTreeMap<String, String> = BTreeMap::new();
+
+    visited.insert(from.to_string());
+    queue.push_back(from.to_string());
+
+    while let Some(current) = queue.pop_front() {
+        if current == to {
+            let mut path = vec![current.clone()];
+            let mut cursor = current;
+
+            while let Some(prev) = parent.get(&cursor).cloned() {
+                path.push(prev.clone());
+                cursor = prev;
+            }
+
+            path.reverse();
+            return Some(path);
+        }
+
+        if let Some(neighbors) = adjacency.get(&current) {
+            for neighbor in neighbors {
+                if visited.insert(neighbor.clone()) {
+                    parent.insert(neighbor.clone(), current.clone());
+                    queue.push_back(neighbor.clone());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn build_adjacency(graph: &ExposureGraph) -> BTreeMap<String, Vec<String>> {
+    let mut adjacency: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    for edge in &graph.edges {
+        adjacency
+            .entry(edge.from.clone())
+            .or_default()
+            .push(edge.to.clone());
+        adjacency
+            .entry(edge.to.clone())
+            .or_default()
+            .push(edge.from.clone());
+    }
+
+    adjacency
 }
 
 fn matches_preset(
@@ -594,10 +906,19 @@ fn build_degree_map(graph: &ExposureGraph) -> BTreeMap<String, usize> {
     degree_map
 }
 
-fn summarize_matches(matches: &[QueryMatch], total_matches: usize) -> QuerySummary {
+fn summarize_matches(
+    matches: &[QueryMatch],
+    total_matches: usize,
+    seed_matches: usize,
+    expanded_matches: usize,
+    path_found: bool,
+) -> QuerySummary {
     let mut summary = QuerySummary {
         total_matches,
         returned_matches: matches.len(),
+        seed_matches,
+        expanded_matches,
+        path_found,
         ..Default::default()
     };
 
@@ -720,6 +1041,14 @@ fn collect_explanations(
         collect_expr_reasons(graph, node, expr, degree_map, &mut explanations)?;
     }
 
+    if request.expand_depth > 0 {
+        explanations.push(format!("expand depth: {}", request.expand_depth));
+    }
+
+    if matches!(request.mode, QueryMode::Neighbors) {
+        explanations.push(format!("neighbors depth: {}", request.neighbors_depth));
+    }
+
     Ok(explanations)
 }
 
@@ -811,6 +1140,7 @@ mod tests {
 
         let mut graph = ExposureGraph::empty("example.com");
 
+        let target_id = graph.nodes[0].node_id.clone();
         let service_id = "service1".to_string();
         let tech_id = "tech1".to_string();
         let episode_id = "episode1".to_string();
@@ -865,6 +1195,18 @@ mod tests {
             kind: NodeKind::Subdomain,
             label: "admin.example.com".to_string(),
             target: "example.com".to_string(),
+            first_seen: Some(earlier),
+            last_seen: Some(now),
+            attributes: BTreeMap::new(),
+        });
+
+        graph.edges.push(GraphEdge {
+            edge_id: "e0".to_string(),
+            from: target_id,
+            to: subdomain_id.clone(),
+            kind: EdgeKind::Contains,
+            target: "example.com".to_string(),
+            weight: 1,
             first_seen: Some(earlier),
             last_seen: Some(now),
             attributes: BTreeMap::new(),
@@ -1030,5 +1372,32 @@ mod tests {
         let result = execute_query(&graph, &request).unwrap();
         assert_eq!(result.summary.total_matches, 2);
         assert_eq!(result.summary.returned_matches, 1);
+    }
+
+    #[test]
+    fn expand_adds_neighbors() {
+        let graph = sample_graph();
+        let request =
+            crate::parser::parse_query(r#"services technology=cloudflare EXPAND 1"#, 50).unwrap();
+        let result = execute_query(&graph, &request).unwrap();
+        assert!(result.summary.total_matches > result.summary.seed_matches);
+    }
+
+    #[test]
+    fn neighbors_mode_returns_related_nodes() {
+        let graph = sample_graph();
+        let request =
+            crate::parser::parse_query(r#"NEIGHBORS label=admin.example.com DEPTH 1"#, 50).unwrap();
+        let result = execute_query(&graph, &request).unwrap();
+        assert!(result.summary.total_matches >= 1);
+    }
+
+    #[test]
+    fn path_mode_finds_path() {
+        let graph = sample_graph();
+        let request = crate::parser::parse_query(r#"PATH example.com -> cloudflare"#, 50).unwrap();
+        let result = execute_query(&graph, &request).unwrap();
+        assert!(result.summary.path_found);
+        assert!(result.matched_nodes.len() >= 2);
     }
 }
