@@ -77,7 +77,7 @@ pub fn build_episodes(clusters: &[CorrelationCluster]) -> Result<Vec<RiskEpisode
         });
     }
 
-    episodes.sort_by(|a, b| b.score.cmp(&a.score));
+    episodes.sort_by_key(|b| std::cmp::Reverse(b.score));
     Ok(episodes)
 }
 
@@ -93,7 +93,7 @@ pub fn build_episodes_for_timeline(
         all.append(&mut episodes);
     }
 
-    all.sort_by(|a, b| b.score.cmp(&a.score));
+    all.sort_by_key(|b| std::cmp::Reverse(b.score));
 
     Ok(EpisodeCollection {
         target: target.to_string(),

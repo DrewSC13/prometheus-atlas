@@ -117,7 +117,7 @@ pub fn load_all_snapshots_for_target(base_dir: &Path, target: &str) -> Result<Ve
         snapshots.push(load_snapshot(&path)?);
     }
 
-    snapshots.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+    snapshots.sort_by_key(|a| a.timestamp);
     Ok(snapshots)
 }
 

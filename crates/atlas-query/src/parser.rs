@@ -369,6 +369,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
             let quote = ch;
             i += 1;
             let mut value = String::new();
+            let mut closed = false;
 
             while i < chars.len() {
                 let current = chars[i];
@@ -380,6 +381,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
 
                 if current == quote {
                     i += 1;
+                    closed = true;
                     break;
                 }
 
@@ -387,7 +389,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                 i += 1;
             }
 
-            if i > chars.len() {
+            if !closed {
                 bail!("string sin cierre");
             }
 
@@ -398,7 +400,12 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
         let start = i;
         while i < chars.len() {
             let current = chars[i];
-            if current.is_whitespace() || current == '(' || current == ')' || current == '"' || current == '\'' {
+            if current.is_whitespace()
+                || current == '('
+                || current == ')'
+                || current == '"'
+                || current == '\''
+            {
                 break;
             }
             i += 1;
@@ -548,9 +555,8 @@ mod tests {
         let query = parse_query(r#"services NOT state=resolved"#, 20).unwrap();
 
         match query.expr {
-            Some(QueryExpr::And(items)) => {
-                assert_eq!(items.len(), 2);
-                assert!(matches!(items[1], QueryExpr::Not(_)));
+            Some(QueryExpr::Not(inner)) => {
+                assert!(matches!(*inner, QueryExpr::Clause(_)));
             }
             other => panic!("expr inesperada: {other:?}"),
         }

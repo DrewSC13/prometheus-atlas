@@ -630,11 +630,11 @@ fn build_executive_summary(transitions: &[TimelineTransition]) -> TimelineExecut
     };
 
     let mut top_resources: Vec<_> = resource_map.into_values().collect();
-    top_resources.sort_by(|a, b| b.total_score.cmp(&a.total_score));
+    top_resources.sort_by_key(|b| std::cmp::Reverse(b.total_score));
     top_resources.truncate(5);
 
     let mut top_categories: Vec<_> = category_map.into_values().collect();
-    top_categories.sort_by(|a, b| b.total_score.cmp(&a.total_score));
+    top_categories.sort_by_key(|b| std::cmp::Reverse(b.total_score));
     top_categories.truncate(5);
 
     TimelineExecutiveSummary {
@@ -1063,7 +1063,7 @@ fn group_findings(findings: &[DriftFinding]) -> Vec<DriftGroup> {
     let mut groups = Vec::new();
 
     for (resource, mut findings) in grouped {
-        findings.sort_by(|a, b| b.score.cmp(&a.score));
+        findings.sort_by_key(|b| std::cmp::Reverse(b.score));
 
         let highest_severity = findings
             .iter()
@@ -1088,7 +1088,7 @@ fn group_findings(findings: &[DriftFinding]) -> Vec<DriftGroup> {
         });
     }
 
-    groups.sort_by(|a, b| b.total_score.cmp(&a.total_score));
+    groups.sort_by_key(|b| std::cmp::Reverse(b.total_score));
     groups
 }
 

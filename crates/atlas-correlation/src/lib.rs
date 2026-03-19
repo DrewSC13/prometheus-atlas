@@ -129,7 +129,9 @@ pub fn correlate_report_with_config(
         });
     }
 
-    clusters.sort_by(|a, b| b.score.cmp(&a.score));
+    // ✅ FIX CLIPPY
+    clusters.sort_by_key(|b| std::cmp::Reverse(b.score));
+
     Ok(clusters)
 }
 

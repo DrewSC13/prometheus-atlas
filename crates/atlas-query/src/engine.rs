@@ -125,7 +125,7 @@ pub fn execute_query(graph: &ExposureGraph, request: &QueryRequest) -> Result<Qu
         });
     }
 
-    sort_matches(graph, &degree_map, &mut all_matches, request);
+    sort_matches(graph, &mut all_matches, request);
 
     let total_matches = all_matches.len();
     let offset = request.offset.min(total_matches);
@@ -257,8 +257,12 @@ fn matches_clause(
                 state_rank,
             ))
         }
-        QueryField::FirstSeen => compare_datetime_clause(node.first_seen, &clause.value, &clause.comparator),
-        QueryField::LastSeen => compare_datetime_clause(node.last_seen, &clause.value, &clause.comparator),
+        QueryField::FirstSeen => {
+            compare_datetime_clause(node.first_seen, &clause.value, &clause.comparator)
+        }
+        QueryField::LastSeen => {
+            compare_datetime_clause(node.last_seen, &clause.value, &clause.comparator)
+        }
         QueryField::Source => Ok(compare_string(
             &attribute(node, "source"),
             &clause.value,
@@ -307,7 +311,9 @@ fn matches_clause(
             Ok(compare_number(actual, expected, &clause.comparator))
         }
         QueryField::ResourceCount => {
-            let actual = attribute(node, "resource_count").parse::<usize>().unwrap_or(0);
+            let actual = attribute(node, "resource_count")
+                .parse::<usize>()
+                .unwrap_or(0);
             let expected = parse_usize(&clause.value, "resource_count")?;
             Ok(compare_number(actual, expected, &clause.comparator))
         }
@@ -419,7 +425,8 @@ fn graph_neighbors<'a>(graph: &'a ExposureGraph, node_id: &str) -> Vec<&'a Graph
         }
     }
 
-    graph.nodes
+    graph
+        .nodes
         .iter()
         .filter(|node| neighbor_ids.iter().any(|id| id == &node.node_id))
         .collect()
@@ -507,7 +514,11 @@ fn compare_number(left: usize, right: usize, comparator: &Comparator) -> bool {
 fn compare_bool(left: bool, right: bool, comparator: &Comparator) -> bool {
     match comparator {
         Comparator::Eq => left == right,
-        Comparator::Contains | Comparator::Gt | Comparator::Gte | Comparator::Lt | Comparator::Lte => false,
+        Comparator::Contains
+        | Comparator::Gt
+        | Comparator::Gte
+        | Comparator::Lt
+        | Comparator::Lte => false,
     }
 }
 
@@ -584,9 +595,11 @@ fn build_degree_map(graph: &ExposureGraph) -> BTreeMap<String, usize> {
 }
 
 fn summarize_matches(matches: &[QueryMatch], total_matches: usize) -> QuerySummary {
-    let mut summary = QuerySummary::default();
-    summary.total_matches = total_matches;
-    summary.returned_matches = matches.len();
+    let mut summary = QuerySummary {
+        total_matches,
+        returned_matches: matches.len(),
+        ..Default::default()
+    };
 
     for item in matches {
         summary.max_degree = summary.max_degree.max(item.degree);
@@ -599,12 +612,7 @@ fn summarize_matches(matches: &[QueryMatch], total_matches: usize) -> QuerySumma
     summary
 }
 
-fn sort_matches(
-    graph: &ExposureGraph,
-    degree_map: &BTreeMap<String, usize>,
-    matches: &mut [QueryMatch],
-    request: &QueryRequest,
-) {
+fn sort_matches(graph: &ExposureGraph, matches: &mut [QueryMatch], request: &QueryRequest) {
     if let Some(sort) = &request.sort {
         matches.sort_by(|a, b| {
             let node_a = graph.nodes.iter().find(|n| n.node_id == a.node_id);
@@ -621,10 +629,15 @@ fn sort_matches(
                     .and_then(|n| n.last_seen)
                     .cmp(&node_b.and_then(|n| n.last_seen)),
                 SortField::Score => sort_number_attr(a, b, "score", "total_score"),
-                SortField::Severity => sort_ranked_attr(a, b, &["severity", "highest_severity"], severity_rank),
-                SortField::Criticality => {
-                    sort_ranked_attr(a, b, &["criticality", "highest_criticality"], criticality_rank)
+                SortField::Severity => {
+                    sort_ranked_attr(a, b, &["severity", "highest_severity"], severity_rank)
                 }
+                SortField::Criticality => sort_ranked_attr(
+                    a,
+                    b,
+                    &["criticality", "highest_criticality"],
+                    criticality_rank,
+                ),
             };
 
             let ordering = match sort.direction {
@@ -639,7 +652,6 @@ fn sort_matches(
                 .then_with(|| a.node_id.cmp(&b.node_id))
         });
     } else {
-        let _ = degree_map;
         sort_matches_default(matches);
     }
 }
@@ -965,7 +977,8 @@ mod tests {
     #[test]
     fn not_clause_excludes_service() {
         let graph = sample_graph();
-        let request = crate::parser::parse_query(r#"services NOT provider=cloudflare"#, 20).unwrap();
+        let request =
+            crate::parser::parse_query(r#"services NOT provider=cloudflare"#, 20).unwrap();
         let result = execute_query(&graph, &request).unwrap();
         assert_eq!(result.summary.total_matches, 0);
     }
@@ -986,7 +999,9 @@ mod tests {
     #[test]
     fn time_filters_work() {
         let graph = sample_graph();
-        let threshold = (Utc::now() - Duration::days(2)).format("%Y-%m-%d").to_string();
+        let threshold = (Utc::now() - Duration::days(2))
+            .format("%Y-%m-%d")
+            .to_string();
         let query = format!("services last_seen>={threshold}");
         let request = crate::parser::parse_query(&query, 20).unwrap();
         let result = execute_query(&graph, &request).unwrap();
