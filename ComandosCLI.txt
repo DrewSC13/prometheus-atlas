@@ -1,67 +1,605 @@
-cargo run -p atlas -- scan example.com
+PROMETHEUS ATLAS - COMANDOS CLI
+================================
 
-cargo run -p atlas -- snapshot example.com
-cargo run -p atlas -- snapshot example.com --persist
-cargo run -p atlas -- snapshots example.com
+Versión actual de referencia: v0.20.0
+Propósito: operar escaneo, snapshots, drift, grafos, queries, reportes, scheduler, jobs y gestión operativa de hallazgos.
 
-cargo run -p atlas -- timeline example.com
+--------------------------------------------------
+0. NOTAS GENERALES
+--------------------------------------------------
 
-cargo run -p atlas -- episodes example.com
+0.1. Ejecutar CLI
+    Todos los comandos se ejecutan así:
 
-cargo run -p atlas -- graph example.com
-cargo run -p atlas -- graph-stats example.com
+    cargo run -p atlas -- <comando> [opciones]
 
-cargo run -p atlas -- query example.com 'services technology=cloudflare'
-cargo run -p atlas -- query example.com 'EXPLAIN services connected_to=admin.example.com AND in_episode=true'
-cargo run -p atlas -- query example.com 'services technology=cloudflare EXPAND 1'
-cargo run -p atlas -- query example.com 'label=admin.example.com EXPAND 2'
-cargo run -p atlas -- query example.com 'NEIGHBORS label=example.com DEPTH 2'
-cargo run -p atlas -- query example.com 'NEIGHBORS services technology=cloudflare DEPTH 1'
-cargo run -p atlas -- query example.com 'PATH example.com -> cloudflare'
-cargo run -p atlas -- query example.com 'PATH admin.example.com -> "https://admin.example.com"'
+0.2. Target de ejemplo
+    En este documento se usa:
+    example.com
 
-cargo run -p atlas -- history example.com
-cargo run -p atlas -- findings example.com
+0.3. Salidas JSON
+    Muchos comandos soportan:
+    --json
+    --output archivo.json
 
-cargo run -p atlas -- diff lab/old_snapshot.json lab/new_snapshot.json
+0.4. Persistencia
+    Algunos comandos permiten guardar resultados en storage con:
+    --persist
 
-cargo run -p atlas -- drift lab/old_snapshot.json lab/new_snapshot.json
-cargo run -p atlas -- drift lab/old_snapshot.json lab/new_snapshot.json --policy lab/policy.json
+0.5. Archivos de laboratorio
+    Para pruebas de diff/drift:
+    lab/old_snapshot.json
+    lab/new_snapshot.json
+    lab/policy.json
 
-cargo run -p atlas -- export example.com --format json --output findings.json
 
-cargo run -p atlas -- query-save risky-admin 'services (title~admin OR label~admin) AND tls_enabled=false'
-cargo run -p atlas -- query-list
-cargo run -p atlas -- query-run risky-admin example.com
-cargo run -p atlas -- query-delete risky-admin
+==================================================
+1. INICIALIZACIÓN Y CONFIGURACIÓN
+==================================================
 
-cargo run -p atlas -- report example.com
-cargo run -p atlas -- report example.com --json --output report.json
+1.1. Inicializar configuración por defecto
+    Qué hace:
+    - Crea atlas.toml si no existe
+    - Inicializa la base de datos/storage
 
-cargo run -p atlas -- rebuild example.com
-cargo run -p atlas -- rebuild example.com --persist
+    Comando:
+    cargo run -p atlas -- init
 
-cargo run -p atlas -- job-create example.com --profile standard --interval 3600
-cargo run -p atlas -- job-list
-cargo run -p atlas -- scheduler-run
-cargo run -p atlas -- job-disable <job_id>
-cargo run -p atlas -- job-enable <job_id>
-cargo run -p atlas -- job-run <job_id>
-cargo run -p atlas -- job-delete <job_id>
+1.2. Inicializar configuración en ruta específica
+    Qué hace:
+    - Crea un archivo de configuración personalizado
 
-cargo run -p atlas -- job-history
-cargo run -p atlas -- job-history --target example.com
-cargo run -p atlas -- job-history --job-id <JOB_ID>
+    Comando:
+    cargo run -p atlas -- init --output atlas.toml
 
-cargo run -p atlas -- scheduler-status
-cargo run -p atlas -- scheduler-status --json --output scheduler_status.json
+1.3. Ver perfiles disponibles
+    Qué hace:
+    - Lista perfiles de escaneo configurados en atlas.toml
 
-cargo run -p atlas -- finding-list example.com
-cargo run -p atlas -- finding-list example.com --op-state open
-cargo run -p atlas -- finding-ack 3af898c74641e919b166da1e
-cargo run -p atlas -- finding-resolve 3af898c74641e919b166da1e
-cargo run -p atlas -- finding-accept 3af898c74641e919b166da1e
-cargo run -p atlas -- finding-assign 3af898c74641e919b166da1e claudio
-cargo run -p atlas -- finding-note 3af898c74641e919b166da1e "validado en revisión interna"
+    Comando:
+    cargo run -p atlas -- profiles
 
-cargo run -p atlas -- report-findings example.com
+1.4. Ver perfiles en JSON
+    Comando:
+    cargo run -p atlas -- profiles --json --output profiles.json
+
+
+==================================================
+2. ESCANEO Y SNAPSHOTS
+==================================================
+
+2.1. Escanear un target
+    Qué hace:
+    - Descubre IPs, subdominios y servicios HTTP
+
+    Comando:
+    cargo run -p atlas -- scan example.com
+
+2.2. Escanear con salida JSON
+    Comando:
+    cargo run -p atlas -- scan example.com --json --output scan.json
+
+2.3. Crear snapshot
+    Qué hace:
+    - Ejecuta escaneo y guarda snapshot en .snapshots
+
+    Comando:
+    cargo run -p atlas -- snapshot example.com
+
+2.4. Crear snapshot y persistir en storage
+    Comando:
+    cargo run -p atlas -- snapshot example.com --persist
+
+2.5. Crear snapshot en directorio personalizado
+    Comando:
+    cargo run -p atlas -- snapshot example.com --dir .snapshots
+
+2.6. Listar snapshots persistidos
+    Qué hace:
+    - Lista snapshots registrados en base de datos
+
+    Comando:
+    cargo run -p atlas -- snapshots example.com
+
+
+==================================================
+3. DIFF Y DRIFT
+==================================================
+
+3.1. Comparar dos snapshots
+    Qué hace:
+    - Detecta nuevos/removidos/modificados entre snapshots
+
+    Comando:
+    cargo run -p atlas -- diff lab/old_snapshot.json lab/new_snapshot.json
+
+3.2. Comparar dos snapshots con JSON
+    Comando:
+    cargo run -p atlas -- diff lab/old_snapshot.json lab/new_snapshot.json --json --output diff.json
+
+3.3. Analizar drift sin policy
+    Qué hace:
+    - Genera hallazgos analíticos a partir del diff
+
+    Comando:
+    cargo run -p atlas -- drift lab/old_snapshot.json lab/new_snapshot.json
+
+3.4. Analizar drift con policy
+    Qué hace:
+    - Aplica allowlists, baseline, critical resources y excepciones
+
+    Comando:
+    cargo run -p atlas -- drift lab/old_snapshot.json lab/new_snapshot.json --policy lab/policy.json
+
+3.5. Analizar drift con persistencia
+    Comando:
+    cargo run -p atlas -- drift lab/old_snapshot.json lab/new_snapshot.json --persist
+
+3.6. Drift en JSON
+    Comando:
+    cargo run -p atlas -- drift lab/old_snapshot.json lab/new_snapshot.json --json --output drift.json
+
+
+==================================================
+4. TIMELINE, EPISODES Y GRAFO
+==================================================
+
+4.1. Construir timeline de snapshots
+    Qué hace:
+    - Analiza transiciones entre snapshots del target
+
+    Comando:
+    cargo run -p atlas -- timeline example.com
+
+4.2. Timeline con policy
+    Comando:
+    cargo run -p atlas -- timeline example.com --policy lab/policy.json
+
+4.3. Timeline en JSON
+    Comando:
+    cargo run -p atlas -- timeline example.com --json --output timeline.json
+
+4.4. Construir episodios
+    Qué hace:
+    - Agrupa hallazgos relacionados en episodios compuestos
+
+    Comando:
+    cargo run -p atlas -- episodes example.com
+
+4.5. Construir episodios con persistencia
+    Comando:
+    cargo run -p atlas -- episodes example.com --persist
+
+4.6. Episodios en JSON
+    Comando:
+    cargo run -p atlas -- episodes example.com --json --output episodes.json
+
+4.7. Construir grafo de exposición
+    Qué hace:
+    - Une target, subdominios, IPs, servicios, tecnologías y episodios
+
+    Comando:
+    cargo run -p atlas -- graph example.com
+
+4.8. Construir grafo con persistencia
+    Comando:
+    cargo run -p atlas -- graph example.com --persist
+
+4.9. Grafo en JSON
+    Comando:
+    cargo run -p atlas -- graph example.com --json --output graph.json
+
+4.10. Estadísticas del grafo persistido
+    Qué hace:
+    - Resume nodos, edges, hubs y topología
+
+    Comando:
+    cargo run -p atlas -- graph-stats example.com
+
+4.11. Estadísticas del grafo en JSON
+    Comando:
+    cargo run -p atlas -- graph-stats example.com --json --output graph_stats.json
+
+4.12. Búsqueda simple en el grafo
+    Qué hace:
+    - Filtra por kind, label_contains y min_degree
+
+    Comando:
+    cargo run -p atlas -- graph-search example.com --kind service --label-contains admin --min-degree 1
+
+4.13. Búsqueda simple en JSON
+    Comando:
+    cargo run -p atlas -- graph-search example.com --kind service --label-contains admin --json --output graph_search.json
+
+
+==================================================
+5. QUERY DSL
+==================================================
+
+5.1. Query simple por tecnología
+    Comando:
+    cargo run -p atlas -- query example.com 'services technology=cloudflare'
+
+5.2. Query con EXPLAIN
+    Qué hace:
+    - Muestra por qué un nodo matcheó la query
+
+    Comando:
+    cargo run -p atlas -- query example.com 'EXPLAIN services connected_to=admin.example.com AND in_episode=true'
+
+5.3. Query con expansión de vecinos
+    Qué hace:
+    - Expande nodos relacionados a N saltos
+
+    Comando:
+    cargo run -p atlas -- query example.com 'services technology=cloudflare EXPAND 1'
+
+5.4. Query expandiendo desde un label
+    Comando:
+    cargo run -p atlas -- query example.com 'label=admin.example.com EXPAND 2'
+
+5.5. Modo NEIGHBORS
+    Qué hace:
+    - Trae vecinos hasta cierta profundidad
+
+    Comando:
+    cargo run -p atlas -- query example.com 'NEIGHBORS label=example.com DEPTH 2'
+
+5.6. Modo NEIGHBORS sobre resultados filtrados
+    Comando:
+    cargo run -p atlas -- query example.com 'NEIGHBORS services technology=cloudflare DEPTH 1'
+
+5.7. Modo PATH
+    Qué hace:
+    - Busca camino entre nodo origen y nodo destino
+
+    Comando:
+    cargo run -p atlas -- query example.com 'PATH example.com -> cloudflare'
+
+5.8. PATH entre subdominio y servicio
+    Comando:
+    cargo run -p atlas -- query example.com 'PATH admin.example.com -> "https://admin.example.com"'
+
+5.9. Query con JSON
+    Comando:
+    cargo run -p atlas -- query example.com 'services technology=cloudflare' --json --output query.json
+
+
+==================================================
+6. QUERIES GUARDADAS
+==================================================
+
+6.1. Guardar query
+    Qué hace:
+    - Guarda una query reutilizable en storage
+
+    Comando:
+    cargo run -p atlas -- query-save risky-admin 'services (title~admin OR label~admin) AND tls_enabled=false'
+
+6.2. Listar queries guardadas
+    Comando:
+    cargo run -p atlas -- query-list
+
+6.3. Listar queries guardadas en JSON
+    Comando:
+    cargo run -p atlas -- query-list --json --output query_list.json
+
+6.4. Ejecutar query guardada
+    Comando:
+    cargo run -p atlas -- query-run risky-admin example.com
+
+6.5. Ejecutar query guardada con límite
+    Comando:
+    cargo run -p atlas -- query-run risky-admin example.com --limit 10
+
+6.6. Ejecutar todas las queries guardadas
+    Qué hace:
+    - Corre todas las queries guardadas sobre el target
+
+    Comando:
+    cargo run -p atlas -- query-run-all example.com
+
+6.7. Ejecutar todas las queries guardadas en JSON
+    Comando:
+    cargo run -p atlas -- query-run-all example.com --json --output query_run_all.json
+
+6.8. Eliminar query guardada
+    Comando:
+    cargo run -p atlas -- query-delete risky-admin
+
+
+==================================================
+7. BASELINE Y POLICIES
+==================================================
+
+7.1. Aprobar recurso en baseline
+    Qué hace:
+    - Marca recurso como aprobado/recurrente esperado
+
+    Comando:
+    cargo run -p atlas -- baseline-approve admin.example.com
+
+7.2. Revocar recurso de baseline
+    Comando:
+    cargo run -p atlas -- baseline-revoke admin.example.com
+
+7.3. Listar baseline aprobado
+    Comando:
+    cargo run -p atlas -- baseline-list
+
+7.4. Listar baseline en JSON
+    Comando:
+    cargo run -p atlas -- baseline-list --json --output baseline.json
+
+7.5. Validar policy
+    Qué hace:
+    - Carga y valida estructura de policy JSON
+
+    Comando:
+    cargo run -p atlas -- policy-check --policy lab/policy.json
+
+7.6. Validar policy en JSON
+    Comando:
+    cargo run -p atlas -- policy-check --policy lab/policy.json --json --output policy_check.json
+
+
+==================================================
+8. REPORTES Y REBUILD
+==================================================
+
+8.1. Reporte ejecutivo
+    Qué hace:
+    - Resume snapshots, timeline, episodios, grafo y recomendaciones
+
+    Comando:
+    cargo run -p atlas -- report example.com
+
+8.2. Reporte ejecutivo con policy
+    Comando:
+    cargo run -p atlas -- report example.com --policy lab/policy.json
+
+8.3. Reporte en JSON
+    Comando:
+    cargo run -p atlas -- report example.com --json --output report.json
+
+8.4. Rebuild analítico
+    Qué hace:
+    - Reconstruye timeline, episodios y grafo desde snapshots existentes
+
+    Comando:
+    cargo run -p atlas -- rebuild example.com
+
+8.5. Rebuild con persistencia
+    Comando:
+    cargo run -p atlas -- rebuild example.com --persist
+
+8.6. Rebuild en JSON
+    Comando:
+    cargo run -p atlas -- rebuild example.com --json --output rebuild.json
+
+8.7. Reporte operativo de findings
+    Qué hace:
+    - Resume estado operativo de hallazgos
+
+    Comando:
+    cargo run -p atlas -- report-findings example.com
+
+
+==================================================
+9. HISTORIAL, FINDINGS Y EXPORT
+==================================================
+
+9.1. Ver historial de drift persistido
+    Comando:
+    cargo run -p atlas -- history example.com
+
+9.2. Ver findings analíticos persistidos
+    Comando:
+    cargo run -p atlas -- findings example.com
+
+9.3. Ver findings filtrando severidad
+    Comando:
+    cargo run -p atlas -- findings example.com --severity HIGH
+
+9.4. Ver findings filtrando estado analítico
+    Comando:
+    cargo run -p atlas -- findings example.com --state New
+
+9.5. Exportar findings a JSON
+    Comando:
+    cargo run -p atlas -- export example.com --format json --output findings.json
+
+9.6. Exportar findings a NDJSON
+    Comando:
+    cargo run -p atlas -- export example.com --format ndjson --output findings.ndjson
+
+9.7. Exportar findings a CSV
+    Comando:
+    cargo run -p atlas -- export example.com --format csv --output findings.csv
+
+
+==================================================
+10. GESTIÓN OPERATIVA DE FINDINGS
+==================================================
+
+10.1. Listar findings operativos
+    Qué hace:
+    - Muestra hallazgos con estado operativo (open, acknowledged, resolved, accepted)
+
+    Comando:
+    cargo run -p atlas -- finding-list example.com
+
+10.2. Filtrar findings por estado operativo
+    Comando:
+    cargo run -p atlas -- finding-list example.com --op-state open
+
+10.3. Marcar finding como acknowledged
+    Comando:
+    cargo run -p atlas -- finding-ack 3af898c74641e919b166da1e
+
+10.4. Marcar finding como resolved
+    Comando:
+    cargo run -p atlas -- finding-resolve 3af898c74641e919b166da1e
+
+10.5. Marcar finding como accepted
+    Comando:
+    cargo run -p atlas -- finding-accept 3af898c74641e919b166da1e
+
+10.6. Asignar finding a una persona
+    Comando:
+    cargo run -p atlas -- finding-assign 3af898c74641e919b166da1e claudio
+
+10.7. Añadir nota a un finding
+    Comando:
+    cargo run -p atlas -- finding-note 3af898c74641e919b166da1e "validado en revisión interna"
+
+
+==================================================
+11. JOBS Y SCHEDULER
+==================================================
+
+11.1. Crear job programado
+    Qué hace:
+    - Registra un trabajo recurrente para escaneo/rebuild del target
+
+    Comando:
+    cargo run -p atlas -- job-create example.com --profile standard --interval 3600
+
+11.2. Listar jobs
+    Comando:
+    cargo run -p atlas -- job-list
+
+11.3. Ejecutar scheduler manualmente
+    Qué hace:
+    - Busca jobs vencidos y los procesa
+
+    Comando:
+    cargo run -p atlas -- scheduler-run
+
+11.4. Deshabilitar job
+    Comando:
+    cargo run -p atlas -- job-disable <job_id>
+
+11.5. Habilitar job
+    Comando:
+    cargo run -p atlas -- job-enable <job_id>
+
+11.6. Ejecutar job manualmente
+    Comando:
+    cargo run -p atlas -- job-run <job_id>
+
+11.7. Eliminar job
+    Comando:
+    cargo run -p atlas -- job-delete <job_id>
+
+11.8. Ver historial de jobs
+    Comando:
+    cargo run -p atlas -- job-history
+
+11.9. Ver historial de jobs filtrando target
+    Comando:
+    cargo run -p atlas -- job-history --target example.com
+
+11.10. Ver historial de jobs filtrando job_id
+    Comando:
+    cargo run -p atlas -- job-history --job-id <JOB_ID>
+
+11.11. Estado del scheduler
+    Qué hace:
+    - Resume cantidad de jobs, jobs habilitados y jobs due
+
+    Comando:
+    cargo run -p atlas -- scheduler-status
+
+11.12. Estado del scheduler en JSON
+    Comando:
+    cargo run -p atlas -- scheduler-status --json --output scheduler_status.json
+
+
+==================================================
+12. MIGRACIÓN Y TELEMETRÍA
+==================================================
+
+12.1. Migrar snapshots antiguos
+    Qué hace:
+    - Revisa y migra snapshots de versiones previas
+
+    Comando:
+    cargo run -p atlas -- migrate
+
+12.2. Migrar snapshots desde directorio específico
+    Comando:
+    cargo run -p atlas -- migrate --dir .snapshots
+
+12.3. Ver telemetría reciente
+    Comando:
+    cargo run -p atlas -- telemetry
+
+12.4. Ver más eventos de telemetría
+    Comando:
+    cargo run -p atlas -- telemetry --limit 50
+
+
+==================================================
+13. FLUJOS RECOMENDADOS
+==================================================
+
+13.1. Flujo mínimo de análisis
+    1) cargo run -p atlas -- scan example.com
+    2) cargo run -p atlas -- snapshot example.com --persist
+    3) cargo run -p atlas -- graph example.com --persist
+    4) cargo run -p atlas -- report example.com
+
+13.2. Flujo de laboratorio con diff/drift
+    1) cargo run -p atlas -- diff lab/old_snapshot.json lab/new_snapshot.json
+    2) cargo run -p atlas -- drift lab/old_snapshot.json lab/new_snapshot.json
+    3) cargo run -p atlas -- drift lab/old_snapshot.json lab/new_snapshot.json --policy lab/policy.json
+
+13.3. Flujo con queries guardadas
+    1) cargo run -p atlas -- query-save risky-admin 'services (title~admin OR label~admin) AND tls_enabled=false'
+    2) cargo run -p atlas -- query-list
+    3) cargo run -p atlas -- query-run risky-admin example.com
+    4) cargo run -p atlas -- query-run-all example.com
+
+13.4. Flujo operativo de hallazgos
+    1) cargo run -p atlas -- finding-list example.com --op-state open
+    2) cargo run -p atlas -- finding-ack <finding_id>
+    3) cargo run -p atlas -- finding-assign <finding_id> claudio
+    4) cargo run -p atlas -- finding-note <finding_id> "validado en revisión interna"
+    5) cargo run -p atlas -- finding-resolve <finding_id>
+
+13.5. Flujo scheduler/jobs
+    1) cargo run -p atlas -- job-create example.com --profile standard --interval 3600
+    2) cargo run -p atlas -- job-list
+    3) cargo run -p atlas -- scheduler-status
+    4) cargo run -p atlas -- scheduler-run
+    5) cargo run -p atlas -- job-history --target example.com
+
+
+==================================================
+14. OBSERVACIONES IMPORTANTES
+==================================================
+
+14.1. Si un subcomando aparece como "unrecognized subcommand"
+    Significa que todavía no está implementado en tu main.rs actual o no compilaste la versión correcta.
+
+14.2. Si un finding-id falla
+    Verifica que el ID esté completo.
+    Ejemplo correcto:
+    3af898c74641e919b166da1e
+
+14.3. Si PATH no encuentra nodo origen o destino
+    Puede significar:
+    - el nodo no existe en el grafo persistido
+    - el label exacto no coincide
+    - aún no reconstruiste el grafo con los snapshots correctos
+
+14.4. Si timeline/episodes salen vacíos
+    Puede ser normal si entre snapshots no hubo cambios reales relevantes.
+
+14.5. Después de cambios grandes
+    Conviene correr:
+    cargo fmt
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo test --workspace
+    cargo build --workspace
