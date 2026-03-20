@@ -1,11 +1,14 @@
 use anyhow::{bail, Context, Result};
 use atlas_config::AppConfig;
+use atlas_jobs::AtlasJob;
 use atlas_plugins::default_registry_for;
 use atlas_query::{
     build_graph_stats_report, execute_query, graph_search, parse_query, GraphSearchRequest,
 };
 use atlas_report::build_executive_report;
+use atlas_scheduler::select_due_jobs;
 use atlas_store::{AtlasStore, ExportFormat};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use serde_json::json;
@@ -261,6 +264,66 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    JobCreate {
+        target: String,
+
+        #[arg(long)]
+        profile: String,
+
+        #[arg(long)]
+        interval: u64,
+
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        #[arg(long)]
+        disabled: bool,
+    },
+
+    JobList {
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    JobRun {
+        job_id: String,
+
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    JobEnable {
+        job_id: String,
+    },
+
+    JobDisable {
+        job_id: String,
+    },
+
+    JobDelete {
+        job_id: String,
+    },
+
+    SchedulerRun {
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
     Report {
         target: String,
 
@@ -390,6 +453,28 @@ struct PolicyCheckSummary {
 struct BaselineListSummary {
     total: usize,
     resources: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JobExecutionSummary {
+    job_id: String,
+    target: String,
+    profile: String,
+    snapshot_path: String,
+    drift_findings: usize,
+    transition_count: usize,
+    episode_count: usize,
+    graph_nodes: usize,
+    graph_edges: usize,
+    persisted: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SchedulerRunSummary {
+    total_jobs: usize,
+    due_jobs: usize,
+    executed_jobs: usize,
+    results: Vec<JobExecutionSummary>,
 }
 
 #[tokio::main]
@@ -1171,6 +1256,239 @@ async fn main() -> Result<()> {
             )?;
         }
 
+        Commands::JobCreate {
+            target,
+            profile,
+            interval,
+            policy,
+            disabled,
+        } => {
+            let started = Instant::now();
+            config.profile(&profile)?;
+
+            if interval == 0 {
+                bail!("interval debe ser > 0");
+            }
+
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let job = AtlasJob::new(
+                target.clone(),
+                profile.clone(),
+                interval,
+                policy.as_ref().map(|p| p.display().to_string()),
+                !disabled,
+            );
+
+            store.insert_job(&job)?;
+            println!(
+                "Job creado: {} | target={} | profile={} | interval={}s | enabled={}",
+                job.job_id, job.target, job.profile, job.interval_seconds, job.enabled
+            );
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "job-create",
+                Some(&target),
+                started.elapsed().as_millis(),
+                json!({
+                    "job_id": job.job_id,
+                    "profile": profile,
+                    "interval": interval,
+                    "enabled": job.enabled
+                }),
+            )?;
+        }
+
+        Commands::JobList {
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let jobs = store.list_jobs()?;
+
+            if want_json {
+                atlas_output::write_json_output(&jobs, output.as_deref())?;
+            } else {
+                print_human_job_list(&jobs);
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "job-list",
+                None,
+                started.elapsed().as_millis(),
+                json!({
+                    "jobs": jobs.len()
+                }),
+            )?;
+        }
+
+        Commands::JobRun {
+            job_id,
+            dir,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let job = store
+                .load_job(&job_id)?
+                .ok_or_else(|| anyhow::anyhow!("job no encontrado: {job_id}"))?;
+
+            let policy_buf = job.policy_path.as_ref().map(PathBuf::from);
+            let summary =
+                execute_job_pipeline(&config, &store, &job, &dir, policy_buf.as_deref()).await?;
+
+            store.touch_job_run(&job.job_id)?;
+
+            if want_json {
+                atlas_output::write_json_output(&summary, output.as_deref())?;
+            } else {
+                print_human_job_execution(&summary);
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "job-run",
+                Some(&job.target),
+                started.elapsed().as_millis(),
+                json!({
+                    "job_id": job.job_id,
+                    "drift_findings": summary.drift_findings,
+                    "episodes": summary.episode_count
+                }),
+            )?;
+        }
+
+        Commands::JobEnable { job_id } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let job = store
+                .load_job(&job_id)?
+                .ok_or_else(|| anyhow::anyhow!("job no encontrado: {job_id}"))?;
+
+            store.set_job_enabled(&job_id, true)?;
+            println!("Job habilitado: {}", job_id);
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "job-enable",
+                Some(&job.target),
+                started.elapsed().as_millis(),
+                json!({
+                    "job_id": job_id
+                }),
+            )?;
+        }
+
+        Commands::JobDisable { job_id } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let job = store
+                .load_job(&job_id)?
+                .ok_or_else(|| anyhow::anyhow!("job no encontrado: {job_id}"))?;
+
+            store.set_job_enabled(&job_id, false)?;
+            println!("Job deshabilitado: {}", job_id);
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "job-disable",
+                Some(&job.target),
+                started.elapsed().as_millis(),
+                json!({
+                    "job_id": job_id
+                }),
+            )?;
+        }
+
+        Commands::JobDelete { job_id } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let job = store
+                .load_job(&job_id)?
+                .ok_or_else(|| anyhow::anyhow!("job no encontrado: {job_id}"))?;
+
+            store.delete_job(&job_id)?;
+            println!("Job eliminado: {}", job_id);
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "job-delete",
+                Some(&job.target),
+                started.elapsed().as_millis(),
+                json!({
+                    "job_id": job_id
+                }),
+            )?;
+        }
+
+        Commands::SchedulerRun {
+            dir,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let jobs = store.list_jobs()?;
+            let due = select_due_jobs(&jobs, Utc::now());
+
+            let mut results = Vec::new();
+            for job in &due {
+                let policy_buf = job.policy_path.as_ref().map(PathBuf::from);
+                let summary =
+                    execute_job_pipeline(&config, &store, job, &dir, policy_buf.as_deref()).await?;
+                store.touch_job_run(&job.job_id)?;
+                results.push(summary);
+            }
+
+            let summary = SchedulerRunSummary {
+                total_jobs: jobs.len(),
+                due_jobs: due.len(),
+                executed_jobs: results.len(),
+                results,
+            };
+
+            if want_json {
+                atlas_output::write_json_output(&summary, output.as_deref())?;
+            } else {
+                print_human_scheduler_run(&summary);
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "scheduler-run",
+                None,
+                started.elapsed().as_millis(),
+                json!({
+                    "total_jobs": summary.total_jobs,
+                    "due_jobs": summary.due_jobs,
+                    "executed_jobs": summary.executed_jobs
+                }),
+            )?;
+        }
+
         Commands::Report {
             target,
             dir,
@@ -1444,6 +1762,82 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn execute_job_pipeline(
+    config: &AppConfig,
+    store: &AtlasStore,
+    job: &AtlasJob,
+    dir: &Path,
+    policy_path: Option<&Path>,
+) -> Result<JobExecutionSummary> {
+    config.profile(&job.profile)?;
+
+    let previous_snapshot_path = store
+        .list_snapshots(&job.target)?
+        .into_iter()
+        .next()
+        .map(|item| PathBuf::from(item.path));
+
+    let scan_result = atlas_discovery::scan_target(&job.target).await?;
+    let snapshot = atlas_snapshot::Snapshot::new(scan_result);
+    let snapshot_path = atlas_snapshot::save_snapshot(&snapshot, dir)?;
+    store.register_snapshot(&snapshot_path, &snapshot)?;
+
+    let mut drift_findings = 0usize;
+
+    if let Some(previous_path) = &previous_snapshot_path {
+        if previous_path.exists() {
+            let older_snapshot = atlas_snapshot::load_snapshot(previous_path)?;
+            let newer_snapshot = atlas_snapshot::load_snapshot(&snapshot_path)?;
+            let diff = atlas_diff::diff_snapshots(&older_snapshot, &newer_snapshot);
+
+            let policy_loaded = load_policy(policy_path)?;
+            let mut drift = atlas_drift::analyze_diff_with_policy(&diff, policy_loaded.as_ref());
+
+            let registry = default_registry_for(&config.plugins.enabled);
+            registry.apply_drift_report(&mut drift);
+
+            drift_findings = drift.findings.len();
+            store.register_drift_report(
+                &job.target,
+                previous_path,
+                &snapshot_path,
+                policy_path,
+                &drift,
+            )?;
+        }
+    }
+
+    let bundle = build_analysis_bundle(config, &job.target, dir, policy_path)?;
+    let transition_count = bundle
+        .timeline
+        .as_ref()
+        .map(|timeline| timeline.transition_count)
+        .unwrap_or(0);
+    let episode_count = bundle
+        .episodes
+        .as_ref()
+        .map(|episodes| episodes.episode_count)
+        .unwrap_or(0);
+
+    if let Some(collection) = &bundle.episodes {
+        store.store_episodes(&job.target, &collection.episodes)?;
+    }
+    store.store_graph(&job.target, &bundle.graph)?;
+
+    Ok(JobExecutionSummary {
+        job_id: job.job_id.clone(),
+        target: job.target.clone(),
+        profile: job.profile.clone(),
+        snapshot_path: snapshot_path.display().to_string(),
+        drift_findings,
+        transition_count,
+        episode_count,
+        graph_nodes: bundle.graph.node_count,
+        graph_edges: bundle.graph.edge_count,
+        persisted: true,
+    })
 }
 
 fn build_graph_from_snapshots_and_context(
@@ -1849,5 +2243,69 @@ fn print_human_policy_check(summary: &PolicyCheckSummary) {
         for line in &summary.details {
             println!("  - {}", line);
         }
+    }
+}
+
+fn print_human_job_list(jobs: &[AtlasJob]) {
+    if jobs.is_empty() {
+        println!("No hay jobs registrados.");
+        return;
+    }
+
+    println!("Jobs registrados:");
+    for job in jobs {
+        println!(
+            "- {} | target={} | profile={} | interval={}s | enabled={}",
+            job.job_id, job.target, job.profile, job.interval_seconds, job.enabled
+        );
+        println!(
+            "    last_run_at={}",
+            job.last_run_at
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| "-".to_string())
+        );
+        println!("    next_run_at={}", job.next_run_at().to_rfc3339());
+
+        if let Some(policy) = &job.policy_path {
+            println!("    policy={}", policy);
+        }
+    }
+}
+
+fn print_human_job_execution(summary: &JobExecutionSummary) {
+    println!("Job ejecutado: {}", summary.job_id);
+    println!("Target: {}", summary.target);
+    println!("Profile: {}", summary.profile);
+    println!("Snapshot: {}", summary.snapshot_path);
+    println!("Drift findings: {}", summary.drift_findings);
+    println!("Transitions: {}", summary.transition_count);
+    println!("Episodes: {}", summary.episode_count);
+    println!("Graph nodes: {}", summary.graph_nodes);
+    println!("Graph edges: {}", summary.graph_edges);
+    println!(
+        "Persisted: {}",
+        if summary.persisted { "yes" } else { "no" }
+    );
+}
+
+fn print_human_scheduler_run(summary: &SchedulerRunSummary) {
+    println!("Scheduler manual ejecutado");
+    println!("Jobs totales: {}", summary.total_jobs);
+    println!("Jobs due: {}", summary.due_jobs);
+    println!("Jobs ejecutados: {}", summary.executed_jobs);
+
+    if summary.results.is_empty() {
+        println!();
+        println!("No había jobs pendientes.");
+        return;
+    }
+
+    println!();
+    println!("Resultados:");
+    for item in &summary.results {
+        println!(
+            "- {} | target={} | findings={} | episodes={} | nodes={}",
+            item.job_id, item.target, item.drift_findings, item.episode_count, item.graph_nodes
+        );
     }
 }

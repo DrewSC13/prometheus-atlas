@@ -7,12 +7,5 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 chrono.workspace = true
-serde.workspace = true
-tokio.workspace = true
-
-atlas-discovery = { path = "../atlas-discovery" }
 atlas-jobs = { path = "../atlas-jobs" }
-atlas-snapshot = { path = "../atlas-snapshot" }
-atlas-store = { path = "../atlas-store" }

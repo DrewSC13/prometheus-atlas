@@ -111,6 +111,7 @@ dependencies = [
  "atlas-plugins",
  "atlas-query",
  "atlas-report",
+ "atlas-scheduler",
  "atlas-snapshot",
  "atlas-store",
  "chrono",
@@ -243,7 +244,6 @@ dependencies = [
 name = "atlas-jobs"
 version = "0.17.0"
 dependencies = [
- "anyhow",
  "chrono",
  "serde",
  "uuid",
@@ -301,14 +301,8 @@ dependencies = [
 name = "atlas-scheduler"
 version = "0.17.0"
 dependencies = [
- "anyhow",
- "atlas-discovery",
  "atlas-jobs",
- "atlas-snapshot",
- "atlas-store",
  "chrono",
- "serde",
- "tokio",
 ]
 
 [[package]]

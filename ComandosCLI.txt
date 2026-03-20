@@ -41,3 +41,11 @@ cargo run -p atlas -- report example.com --json --output report.json
 cargo run -p atlas -- rebuild example.com
 cargo run -p atlas -- rebuild example.com --persist
 
+cargo run -p atlas -- job-create example.com --profile standard --interval 3600
+cargo run -p atlas -- job-list
+cargo run -p atlas -- scheduler-run
+cargo run -p atlas -- job-disable <job_id>
+cargo run -p atlas -- job-enable <job_id>
+cargo run -p atlas -- job-run <job_id>
+cargo run -p atlas -- job-delete <job_id>
+

@@ -1,50 +1,53 @@
-use anyhow::Result;
-use atlas_discovery::scan_target;
-use atlas_jobs::scheduler_plan;
-use atlas_snapshot::{save_snapshot, Snapshot};
-use atlas_store::AtlasStore;
-use chrono::Utc;
-use std::path::Path;
+use atlas_jobs::AtlasJob;
+use chrono::{DateTime, Utc};
 
-pub async fn run_scheduler_once(store: &AtlasStore) -> Result<()> {
-    store.initialize()?;
+pub fn select_due_jobs(jobs: &[AtlasJob], now: DateTime<Utc>) -> Vec<AtlasJob> {
+    let mut due = jobs
+        .iter()
+        .filter(|job| job.is_due_at(now))
+        .cloned()
+        .collect::<Vec<_>>();
 
-    let jobs = store.list_jobs()?;
-    let plans = scheduler_plan(&jobs, Utc::now());
+    due.sort_by(|a, b| {
+        a.next_run_at()
+            .cmp(&b.next_run_at())
+            .then_with(|| a.target.cmp(&b.target))
+            .then_with(|| a.job_id.cmp(&b.job_id))
+    });
 
-    if plans.is_empty() {
-        println!("No hay jobs para ejecutar.");
-        return Ok(());
-    }
-
-    for plan in plans {
-        println!("Ejecutando job {} para {}", plan.job_id, plan.target);
-
-        let scan = scan_target(&plan.target).await?;
-        let snapshot = Snapshot::new(scan);
-
-        let snapshot_dir = Path::new(".snapshots");
-        let path = save_snapshot(&snapshot, snapshot_dir)?;
-
-        store.register_snapshot(&path, &snapshot)?;
-        store.touch_job_run(&plan.job_id)?;
-
-        println!(
-            "Job {} completado. Snapshot guardado en {}",
-            plan.job_id,
-            path.display()
-        );
-    }
-
-    Ok(())
+    due
 }
 
-pub async fn run_scheduler_loop(store: &AtlasStore, interval_seconds: u64) -> Result<()> {
-    loop {
-        if let Err(error) = run_scheduler_once(store).await {
-            eprintln!("Error en scheduler: {error}");
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
 
-        tokio::time::sleep(std::time::Duration::from_secs(interval_seconds)).await;
+    #[test]
+    fn scheduler_selects_due_jobs() {
+        let now = Utc::now();
+
+        let mut due = AtlasJob::new("example.com", "standard", 3600, None, true);
+        due.last_run_at = Some(now - Duration::seconds(7200));
+
+        let mut not_due = AtlasJob::new("test.com", "standard", 3600, None, true);
+        not_due.last_run_at = Some(now - Duration::seconds(10));
+
+        let jobs = vec![due, not_due];
+        let selected = select_due_jobs(&jobs, now);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].target, "example.com");
+    }
+
+    #[test]
+    fn scheduler_ignores_disabled_jobs() {
+        let now = Utc::now();
+
+        let mut job = AtlasJob::new("example.com", "standard", 3600, None, false);
+        job.last_run_at = Some(now - Duration::seconds(7200));
+
+        let selected = select_due_jobs(&[job], now);
+        assert!(selected.is_empty());
     }
 }

@@ -386,6 +386,68 @@ impl AtlasStore {
         Ok(())
     }
 
+    pub fn load_job(&self, job_id: &str) -> Result<Option<AtlasJob>> {
+        let result = self.conn.query_row(
+            r#"
+            SELECT
+                job_id,
+                target,
+                profile,
+                interval_seconds,
+                enabled,
+                policy_path,
+                last_run_at,
+                created_at
+            FROM jobs
+            WHERE job_id = ?1
+            "#,
+            [job_id],
+            |row| {
+                Ok(AtlasJob {
+                    job_id: row_string(row, 0)?,
+                    target: row_string(row, 1)?,
+                    profile: row_string(row, 2)?,
+                    interval_seconds: row_u64(row, 3)? as u64,
+                    enabled: row_bool(row, 4)?,
+                    policy_path: row_optional_string(row, 5)?,
+                    last_run_at: parse_optional_datetime(row_optional_string(row, 6)?),
+                    created_at: parse_datetime(row_string(row, 7)?)?,
+                })
+            },
+        );
+
+        match result {
+            Ok(job) => Ok(Some(job)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn set_job_enabled(&self, job_id: &str, enabled: bool) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE jobs
+            SET enabled = ?1
+            WHERE job_id = ?2
+            "#,
+            params![if enabled { 1 } else { 0 }, job_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn delete_job(&self, job_id: &str) -> Result<()> {
+        self.conn.execute(
+            r#"
+            DELETE FROM jobs
+            WHERE job_id = ?1
+            "#,
+            [job_id],
+        )?;
+
+        Ok(())
+    }
+
     fn insert_finding(
         &self,
         run_id: &str,
@@ -2074,5 +2136,32 @@ mod tests {
 
         store.delete_saved_query("risky-admin").unwrap();
         assert!(store.load_saved_query("risky-admin").unwrap().is_none());
+    }
+
+    #[test]
+    fn stores_and_updates_job() {
+        let db_path = std::env::temp_dir().join(format!(
+            "atlas-store-job-test-{}.db",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+
+        let store = AtlasStore::open(&db_path).unwrap();
+        store.initialize().unwrap();
+
+        let job = AtlasJob::new("example.com", "standard", 3600, None, true);
+        let job_id = job.job_id.clone();
+
+        store.insert_job(&job).unwrap();
+
+        let loaded = store.load_job(&job_id).unwrap().unwrap();
+        assert_eq!(loaded.target, "example.com");
+        assert!(loaded.enabled);
+
+        store.set_job_enabled(&job_id, false).unwrap();
+        let updated = store.load_job(&job_id).unwrap().unwrap();
+        assert!(!updated.enabled);
+
+        store.delete_job(&job_id).unwrap();
+        assert!(store.load_job(&job_id).unwrap().is_none());
     }
 }
