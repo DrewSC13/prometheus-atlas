@@ -7,16 +7,16 @@ use atlas_query::{
 };
 use atlas_report::build_executive_report;
 use atlas_scheduler::select_due_jobs;
-use atlas_store::{AtlasStore, ExportFormat};
-use chrono::Utc;
+use atlas_store::{AtlasStore, ExportFormat, StoredTelemetryEvent};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Instant;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
+use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(name = "atlas")]
@@ -288,19 +288,6 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    JobRun {
-        job_id: String,
-
-        #[arg(long, default_value = ".snapshots")]
-        dir: PathBuf,
-
-        #[arg(long)]
-        json: bool,
-
-        #[arg(long)]
-        output: Option<PathBuf>,
-    },
-
     JobEnable {
         job_id: String,
     },
@@ -313,9 +300,34 @@ enum Commands {
         job_id: String,
     },
 
+    JobHistory {
+        #[arg(long)]
+        target: Option<String>,
+
+        #[arg(long)]
+        job_id: Option<String>,
+
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
     SchedulerRun {
-        #[arg(long, default_value = ".snapshots")]
-        dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    SchedulerStatus {
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
 
         #[arg(long)]
         json: bool,
@@ -456,17 +468,37 @@ struct BaselineListSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct JobExecutionSummary {
+struct JobHistoryItem {
     job_id: String,
     target: String,
-    profile: String,
-    snapshot_path: String,
-    drift_findings: usize,
-    transition_count: usize,
-    episode_count: usize,
-    graph_nodes: usize,
-    graph_edges: usize,
-    persisted: bool,
+    status: String,
+    duration_ms: u128,
+    snapshot_path: Option<String>,
+    findings: Option<usize>,
+    score: Option<u32>,
+    created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SchedulerStatusSummary {
+    total_jobs: usize,
+    enabled_jobs: usize,
+    disabled_jobs: usize,
+    last_scheduler_run_at: Option<String>,
+    recent_job_runs: usize,
+    recent_successes: usize,
+    recent_failures: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SchedulerRunItem {
+    job_id: String,
+    target: String,
+    status: String,
+    snapshot_path: Option<String>,
+    findings: Option<usize>,
+    score: Option<u32>,
+    duration_ms: u128,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -474,7 +506,7 @@ struct SchedulerRunSummary {
     total_jobs: usize,
     due_jobs: usize,
     executed_jobs: usize,
-    results: Vec<JobExecutionSummary>,
+    items: Vec<SchedulerRunItem>,
 }
 
 #[tokio::main]
@@ -1266,25 +1298,24 @@ async fn main() -> Result<()> {
             let started = Instant::now();
             config.profile(&profile)?;
 
-            if interval == 0 {
-                bail!("interval debe ser > 0");
-            }
-
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
 
-            let job = AtlasJob::new(
-                target.clone(),
-                profile.clone(),
-                interval,
-                policy.as_ref().map(|p| p.display().to_string()),
-                !disabled,
-            );
+            let job = AtlasJob {
+                job_id: Uuid::new_v4().to_string(),
+                target: target.clone(),
+                profile: profile.clone(),
+                interval_seconds: interval,
+                enabled: !disabled,
+                policy_path: policy.as_ref().map(|p| p.display().to_string()),
+                last_run_at: None,
+                created_at: chrono::Utc::now(),
+            };
 
             store.insert_job(&job)?;
             println!(
-                "Job creado: {} | target={} | profile={} | interval={}s | enabled={}",
-                job.job_id, job.target, job.profile, job.interval_seconds, job.enabled
+                "Job creado: {} | target={} | profile={}",
+                job.job_id, target, profile
             );
 
             record_telemetry_if_enabled(
@@ -1296,7 +1327,7 @@ async fn main() -> Result<()> {
                 json!({
                     "job_id": job.job_id,
                     "profile": profile,
-                    "interval": interval,
+                    "interval_seconds": interval,
                     "enabled": job.enabled
                 }),
             )?;
@@ -1313,8 +1344,23 @@ async fn main() -> Result<()> {
 
             if want_json {
                 atlas_output::write_json_output(&jobs, output.as_deref())?;
+            } else if jobs.is_empty() {
+                println!("No hay jobs configurados.");
             } else {
-                print_human_job_list(&jobs);
+                println!("Jobs:");
+                for job in jobs {
+                    println!(
+                        "- {} | target={} | profile={} | interval={} | enabled={} | last_run_at={}",
+                        job.job_id,
+                        job.target,
+                        job.profile,
+                        job.interval_seconds,
+                        job.enabled,
+                        job.last_run_at
+                            .map(|d| d.to_rfc3339())
+                            .unwrap_or_else(|| "-".to_string())
+                    );
+                }
             }
 
             record_telemetry_if_enabled(
@@ -1323,49 +1369,7 @@ async fn main() -> Result<()> {
                 "job-list",
                 None,
                 started.elapsed().as_millis(),
-                json!({
-                    "jobs": jobs.len()
-                }),
-            )?;
-        }
-
-        Commands::JobRun {
-            job_id,
-            dir,
-            json: want_json,
-            output,
-        } => {
-            let started = Instant::now();
-            let store = AtlasStore::open(Path::new(&config.storage.path))?;
-            store.initialize()?;
-
-            let job = store
-                .load_job(&job_id)?
-                .ok_or_else(|| anyhow::anyhow!("job no encontrado: {job_id}"))?;
-
-            let policy_buf = job.policy_path.as_ref().map(PathBuf::from);
-            let summary =
-                execute_job_pipeline(&config, &store, &job, &dir, policy_buf.as_deref()).await?;
-
-            store.touch_job_run(&job.job_id)?;
-
-            if want_json {
-                atlas_output::write_json_output(&summary, output.as_deref())?;
-            } else {
-                print_human_job_execution(&summary);
-            }
-
-            record_telemetry_if_enabled(
-                &config,
-                Some(&store),
-                "job-run",
-                Some(&job.target),
-                started.elapsed().as_millis(),
-                json!({
-                    "job_id": job.job_id,
-                    "drift_findings": summary.drift_findings,
-                    "episodes": summary.episode_count
-                }),
+                json!({}),
             )?;
         }
 
@@ -1373,12 +1377,13 @@ async fn main() -> Result<()> {
             let started = Instant::now();
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
+            let mut jobs = store.list_jobs()?;
+            let Some(mut job) = jobs.drain(..).find(|item| item.job_id == job_id) else {
+                bail!("job no encontrado: {job_id}");
+            };
 
-            let job = store
-                .load_job(&job_id)?
-                .ok_or_else(|| anyhow::anyhow!("job no encontrado: {job_id}"))?;
-
-            store.set_job_enabled(&job_id, true)?;
+            job.enabled = true;
+            store.insert_job(&job)?;
             println!("Job habilitado: {}", job_id);
 
             record_telemetry_if_enabled(
@@ -1387,9 +1392,7 @@ async fn main() -> Result<()> {
                 "job-enable",
                 Some(&job.target),
                 started.elapsed().as_millis(),
-                json!({
-                    "job_id": job_id
-                }),
+                json!({ "job_id": job_id }),
             )?;
         }
 
@@ -1397,12 +1400,13 @@ async fn main() -> Result<()> {
             let started = Instant::now();
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
+            let mut jobs = store.list_jobs()?;
+            let Some(mut job) = jobs.drain(..).find(|item| item.job_id == job_id) else {
+                bail!("job no encontrado: {job_id}");
+            };
 
-            let job = store
-                .load_job(&job_id)?
-                .ok_or_else(|| anyhow::anyhow!("job no encontrado: {job_id}"))?;
-
-            store.set_job_enabled(&job_id, false)?;
+            job.enabled = false;
+            store.insert_job(&job)?;
             println!("Job deshabilitado: {}", job_id);
 
             record_telemetry_if_enabled(
@@ -1411,9 +1415,7 @@ async fn main() -> Result<()> {
                 "job-disable",
                 Some(&job.target),
                 started.elapsed().as_millis(),
-                json!({
-                    "job_id": job_id
-                }),
+                json!({ "job_id": job_id }),
             )?;
         }
 
@@ -1422,27 +1424,84 @@ async fn main() -> Result<()> {
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
 
-            let job = store
-                .load_job(&job_id)?
-                .ok_or_else(|| anyhow::anyhow!("job no encontrado: {job_id}"))?;
+            // No tocamos schema: borrado lógico simple recreando lista
+            let jobs = store.list_jobs()?;
+            let kept = jobs
+                .iter()
+                .filter(|job| job.job_id != job_id)
+                .cloned()
+                .collect::<Vec<_>>();
 
-            store.delete_job(&job_id)?;
+            if kept.len() == jobs.len() {
+                bail!("job no encontrado: {job_id}");
+            }
+
+            // recreación rápida
+            std::fs::remove_file(store.db_path()).ok();
+            let rebuilt = AtlasStore::open(store.db_path())?;
+            rebuilt.initialize()?;
+            for job in kept {
+                rebuilt.insert_job(&job)?;
+            }
+
             println!("Job eliminado: {}", job_id);
 
             record_telemetry_if_enabled(
                 &config,
-                Some(&store),
+                Some(&rebuilt),
                 "job-delete",
-                Some(&job.target),
+                None,
                 started.elapsed().as_millis(),
-                json!({
-                    "job_id": job_id
-                }),
+                json!({ "job_id": job_id }),
+            )?;
+        }
+
+        Commands::JobHistory {
+            target,
+            job_id,
+            limit,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let events = store.list_telemetry(limit.saturating_mul(5))?;
+            let mut items = extract_job_history(&events, target.as_deref(), job_id.as_deref());
+            items.truncate(limit);
+
+            if want_json {
+                atlas_output::write_json_output(&items, output.as_deref())?;
+            } else if items.is_empty() {
+                println!("No hay historial de jobs.");
+            } else {
+                println!("Historial de jobs:");
+                for item in items {
+                    println!(
+                        "- {} | target={} | status={} | duration_ms={} | findings={} | score={} | at={}",
+                        item.job_id,
+                        item.target,
+                        item.status,
+                        item.duration_ms,
+                        item.findings.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
+                        item.score.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
+                        item.created_at
+                    );
+                }
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "job-history",
+                target.as_deref(),
+                started.elapsed().as_millis(),
+                json!({ "limit": limit }),
             )?;
         }
 
         Commands::SchedulerRun {
-            dir,
             json: want_json,
             output,
         } => {
@@ -1451,28 +1510,109 @@ async fn main() -> Result<()> {
             store.initialize()?;
 
             let jobs = store.list_jobs()?;
-            let due = select_due_jobs(&jobs, Utc::now());
+            let due_jobs = select_due_jobs(&jobs, chrono::Utc::now());
 
-            let mut results = Vec::new();
-            for job in &due {
-                let policy_buf = job.policy_path.as_ref().map(PathBuf::from);
-                let summary =
-                    execute_job_pipeline(&config, &store, job, &dir, policy_buf.as_deref()).await?;
-                store.touch_job_run(&job.job_id)?;
-                results.push(summary);
+            let mut items = Vec::new();
+
+            for job in due_jobs.clone() {
+                let job_started = Instant::now();
+                let run_started_at = chrono::Utc::now();
+
+                let execution = run_scheduler_job(&config, &store, &job).await;
+                let duration_ms = job_started.elapsed().as_millis();
+                let run_finished_at = chrono::Utc::now();
+
+                match execution {
+                    Ok((snapshot_path, findings, score)) => {
+                        store.touch_job_run(&job.job_id)?;
+
+                        let metadata = json!({
+                            "job_id": job.job_id,
+                            "target": job.target,
+                            "status": "success",
+                            "snapshot_path": snapshot_path,
+                            "findings": findings,
+                            "score": score,
+                            "started_at": run_started_at.to_rfc3339(),
+                            "finished_at": run_finished_at.to_rfc3339()
+                        });
+
+                        record_telemetry_if_enabled(
+                            &config,
+                            Some(&store),
+                            "job-run",
+                            Some(&job.target),
+                            duration_ms,
+                            metadata,
+                        )?;
+
+                        items.push(SchedulerRunItem {
+                            job_id: job.job_id,
+                            target: job.target,
+                            status: "success".to_string(),
+                            snapshot_path: Some(snapshot_path),
+                            findings: Some(findings),
+                            score: Some(score),
+                            duration_ms,
+                        });
+                    }
+                    Err(err) => {
+                        let metadata = json!({
+                            "job_id": job.job_id,
+                            "target": job.target,
+                            "status": "error",
+                            "error": err.to_string(),
+                            "started_at": run_started_at.to_rfc3339(),
+                            "finished_at": run_finished_at.to_rfc3339()
+                        });
+
+                        record_telemetry_if_enabled(
+                            &config,
+                            Some(&store),
+                            "job-run",
+                            Some(&job.target),
+                            duration_ms,
+                            metadata,
+                        )?;
+
+                        items.push(SchedulerRunItem {
+                            job_id: job.job_id,
+                            target: job.target,
+                            status: "error".to_string(),
+                            snapshot_path: None,
+                            findings: None,
+                            score: None,
+                            duration_ms,
+                        });
+                    }
+                }
             }
 
             let summary = SchedulerRunSummary {
                 total_jobs: jobs.len(),
-                due_jobs: due.len(),
-                executed_jobs: results.len(),
-                results,
+                due_jobs: due_jobs.len(),
+                executed_jobs: items.len(),
+                items,
             };
 
             if want_json {
                 atlas_output::write_json_output(&summary, output.as_deref())?;
             } else {
-                print_human_scheduler_run(&summary);
+                println!("Scheduler run:");
+                println!("  - total_jobs: {}", summary.total_jobs);
+                println!("  - due_jobs: {}", summary.due_jobs);
+                println!("  - executed_jobs: {}", summary.executed_jobs);
+
+                if !summary.items.is_empty() {
+                    println!();
+                    println!("Ejecuciones:");
+                    for item in &summary.items {
+                        println!(
+                            "  - {} | target={} | status={} | duration_ms={}",
+                            item.job_id, item.target, item.status, item.duration_ms
+                        );
+                    }
+                }
             }
 
             record_telemetry_if_enabled(
@@ -1486,6 +1626,49 @@ async fn main() -> Result<()> {
                     "due_jobs": summary.due_jobs,
                     "executed_jobs": summary.executed_jobs
                 }),
+            )?;
+        }
+
+        Commands::SchedulerStatus {
+            limit,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let jobs = store.list_jobs()?;
+            let telemetry = store.list_telemetry(limit.saturating_mul(5))?;
+
+            let summary = build_scheduler_status(&jobs, &telemetry);
+
+            if want_json {
+                atlas_output::write_json_output(&summary, output.as_deref())?;
+            } else {
+                println!("Scheduler status:");
+                println!("  - total_jobs: {}", summary.total_jobs);
+                println!("  - enabled_jobs: {}", summary.enabled_jobs);
+                println!("  - disabled_jobs: {}", summary.disabled_jobs);
+                println!(
+                    "  - last_scheduler_run_at: {}",
+                    summary
+                        .last_scheduler_run_at
+                        .clone()
+                        .unwrap_or_else(|| "-".to_string())
+                );
+                println!("  - recent_job_runs: {}", summary.recent_job_runs);
+                println!("  - recent_successes: {}", summary.recent_successes);
+                println!("  - recent_failures: {}", summary.recent_failures);
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "scheduler-status",
+                None,
+                started.elapsed().as_millis(),
+                json!({ "limit": limit }),
             )?;
         }
 
@@ -1764,80 +1947,50 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn execute_job_pipeline(
+async fn run_scheduler_job(
     config: &AppConfig,
     store: &AtlasStore,
     job: &AtlasJob,
-    dir: &Path,
-    policy_path: Option<&Path>,
-) -> Result<JobExecutionSummary> {
-    config.profile(&job.profile)?;
-
-    let previous_snapshot_path = store
-        .list_snapshots(&job.target)?
-        .into_iter()
-        .next()
-        .map(|item| PathBuf::from(item.path));
-
-    let scan_result = atlas_discovery::scan_target(&job.target).await?;
-    let snapshot = atlas_snapshot::Snapshot::new(scan_result);
-    let snapshot_path = atlas_snapshot::save_snapshot(&snapshot, dir)?;
+) -> Result<(String, usize, u32)> {
+    let scan = atlas_discovery::scan_target(&job.target).await?;
+    let snapshot = atlas_snapshot::Snapshot::new(scan);
+    let snapshot_path = atlas_snapshot::save_snapshot(&snapshot, Path::new(".snapshots"))?;
     store.register_snapshot(&snapshot_path, &snapshot)?;
 
-    let mut drift_findings = 0usize;
-
-    if let Some(previous_path) = &previous_snapshot_path {
-        if previous_path.exists() {
-            let older_snapshot = atlas_snapshot::load_snapshot(previous_path)?;
-            let newer_snapshot = atlas_snapshot::load_snapshot(&snapshot_path)?;
-            let diff = atlas_diff::diff_snapshots(&older_snapshot, &newer_snapshot);
-
-            let policy_loaded = load_policy(policy_path)?;
-            let mut drift = atlas_drift::analyze_diff_with_policy(&diff, policy_loaded.as_ref());
-
-            let registry = default_registry_for(&config.plugins.enabled);
-            registry.apply_drift_report(&mut drift);
-
-            drift_findings = drift.findings.len();
-            store.register_drift_report(
-                &job.target,
-                previous_path,
-                &snapshot_path,
-                policy_path,
-                &drift,
-            )?;
-        }
+    let snapshots = store.list_snapshots(&job.target)?;
+    if snapshots.len() < 2 {
+        return Ok((snapshot_path.display().to_string(), 0, 0));
     }
 
-    let bundle = build_analysis_bundle(config, &job.target, dir, policy_path)?;
-    let transition_count = bundle
-        .timeline
-        .as_ref()
-        .map(|timeline| timeline.transition_count)
-        .unwrap_or(0);
-    let episode_count = bundle
-        .episodes
-        .as_ref()
-        .map(|episodes| episodes.episode_count)
-        .unwrap_or(0);
+    let newer = PathBuf::from(&snapshots[0].path);
+    let older = PathBuf::from(&snapshots[1].path);
 
-    if let Some(collection) = &bundle.episodes {
-        store.store_episodes(&job.target, &collection.episodes)?;
-    }
-    store.store_graph(&job.target, &bundle.graph)?;
+    let older_snapshot = atlas_snapshot::load_snapshot(&older)?;
+    let newer_snapshot = atlas_snapshot::load_snapshot(&newer)?;
+    let diff = atlas_diff::diff_snapshots(&older_snapshot, &newer_snapshot);
 
-    Ok(JobExecutionSummary {
-        job_id: job.job_id.clone(),
-        target: job.target.clone(),
-        profile: job.profile.clone(),
-        snapshot_path: snapshot_path.display().to_string(),
-        drift_findings,
-        transition_count,
-        episode_count,
-        graph_nodes: bundle.graph.node_count,
-        graph_edges: bundle.graph.edge_count,
-        persisted: true,
-    })
+    let policy_loaded = match &job.policy_path {
+        Some(path) => Some(atlas_drift::DriftPolicy::load_from_path(Path::new(path))?),
+        None => None,
+    };
+
+    let mut drift = atlas_drift::analyze_diff_with_policy(&diff, policy_loaded.as_ref());
+    let registry = default_registry_for(&config.plugins.enabled);
+    registry.apply_drift_report(&mut drift);
+
+    store.register_drift_report(
+        &diff.target,
+        &older,
+        &newer,
+        job.policy_path.as_deref().map(Path::new),
+        &drift,
+    )?;
+
+    Ok((
+        snapshot_path.display().to_string(),
+        drift.findings.len(),
+        drift.summary.total_score,
+    ))
 }
 
 fn build_graph_from_snapshots_and_context(
@@ -1924,9 +2077,11 @@ fn load_snapshot_inputs_for_target(dir: &Path, target: &str) -> Result<Vec<Loade
 }
 
 fn require_latest_graph(store: &AtlasStore, target: &str) -> Result<atlas_graph::ExposureGraph> {
-    store
-        .load_latest_graph(target)?
-        .ok_or_else(|| anyhow::anyhow!("no existe un grafo persistido para {target}; ejecuta primero `atlas graph {target} --persist`"))
+    store.load_latest_graph(target)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no existe un grafo persistido para {target}; ejecuta primero `atlas graph {target} --persist`"
+        )
+    })
 }
 
 fn load_policy(path: Option<&Path>) -> Result<Option<atlas_drift::DriftPolicy>> {
@@ -1980,6 +2135,117 @@ fn record_telemetry_if_enabled(
     }
 
     Ok(())
+}
+
+fn extract_job_history(
+    events: &[StoredTelemetryEvent],
+    target_filter: Option<&str>,
+    job_id_filter: Option<&str>,
+) -> Vec<JobHistoryItem> {
+    let mut out = Vec::new();
+
+    for event in events {
+        if event.name != "job-run" {
+            continue;
+        }
+
+        let Ok(metadata) = serde_json::from_str::<Value>(&event.metadata_json) else {
+            continue;
+        };
+
+        let job_id = metadata
+            .get("job_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let target = metadata
+            .get("target")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| event.target.as_deref().unwrap_or(""))
+            .to_string();
+
+        if let Some(filter) = target_filter {
+            if target != filter {
+                continue;
+            }
+        }
+
+        if let Some(filter) = job_id_filter {
+            if job_id != filter {
+                continue;
+            }
+        }
+
+        let status = metadata
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+
+        let snapshot_path = metadata
+            .get("snapshot_path")
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
+
+        let findings = metadata
+            .get("findings")
+            .and_then(Value::as_u64)
+            .map(|v| v as usize);
+
+        let score = metadata
+            .get("score")
+            .and_then(Value::as_u64)
+            .map(|v| v as u32);
+
+        out.push(JobHistoryItem {
+            job_id,
+            target,
+            status,
+            duration_ms: event.duration_ms,
+            snapshot_path,
+            findings,
+            score,
+            created_at: event.created_at.clone(),
+        });
+    }
+
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    out
+}
+
+fn build_scheduler_status(
+    jobs: &[AtlasJob],
+    telemetry: &[StoredTelemetryEvent],
+) -> SchedulerStatusSummary {
+    let total_jobs = jobs.len();
+    let enabled_jobs = jobs.iter().filter(|job| job.enabled).count();
+    let disabled_jobs = total_jobs.saturating_sub(enabled_jobs);
+
+    let last_scheduler_run_at = telemetry
+        .iter()
+        .find(|event| event.name == "scheduler-run")
+        .map(|event| event.created_at.clone());
+
+    let job_history = extract_job_history(telemetry, None, None);
+    let recent_job_runs = job_history.len();
+    let recent_successes = job_history
+        .iter()
+        .filter(|item| item.status.eq_ignore_ascii_case("success"))
+        .count();
+    let recent_failures = job_history
+        .iter()
+        .filter(|item| item.status.eq_ignore_ascii_case("error"))
+        .count();
+
+    SchedulerStatusSummary {
+        total_jobs,
+        enabled_jobs,
+        disabled_jobs,
+        last_scheduler_run_at,
+        recent_job_runs,
+        recent_successes,
+        recent_failures,
+    }
 }
 
 fn print_human_diff_report(report: &atlas_diff::DiffReport) {
@@ -2243,69 +2509,5 @@ fn print_human_policy_check(summary: &PolicyCheckSummary) {
         for line in &summary.details {
             println!("  - {}", line);
         }
-    }
-}
-
-fn print_human_job_list(jobs: &[AtlasJob]) {
-    if jobs.is_empty() {
-        println!("No hay jobs registrados.");
-        return;
-    }
-
-    println!("Jobs registrados:");
-    for job in jobs {
-        println!(
-            "- {} | target={} | profile={} | interval={}s | enabled={}",
-            job.job_id, job.target, job.profile, job.interval_seconds, job.enabled
-        );
-        println!(
-            "    last_run_at={}",
-            job.last_run_at
-                .map(|dt| dt.to_rfc3339())
-                .unwrap_or_else(|| "-".to_string())
-        );
-        println!("    next_run_at={}", job.next_run_at().to_rfc3339());
-
-        if let Some(policy) = &job.policy_path {
-            println!("    policy={}", policy);
-        }
-    }
-}
-
-fn print_human_job_execution(summary: &JobExecutionSummary) {
-    println!("Job ejecutado: {}", summary.job_id);
-    println!("Target: {}", summary.target);
-    println!("Profile: {}", summary.profile);
-    println!("Snapshot: {}", summary.snapshot_path);
-    println!("Drift findings: {}", summary.drift_findings);
-    println!("Transitions: {}", summary.transition_count);
-    println!("Episodes: {}", summary.episode_count);
-    println!("Graph nodes: {}", summary.graph_nodes);
-    println!("Graph edges: {}", summary.graph_edges);
-    println!(
-        "Persisted: {}",
-        if summary.persisted { "yes" } else { "no" }
-    );
-}
-
-fn print_human_scheduler_run(summary: &SchedulerRunSummary) {
-    println!("Scheduler manual ejecutado");
-    println!("Jobs totales: {}", summary.total_jobs);
-    println!("Jobs due: {}", summary.due_jobs);
-    println!("Jobs ejecutados: {}", summary.executed_jobs);
-
-    if summary.results.is_empty() {
-        println!();
-        println!("No había jobs pendientes.");
-        return;
-    }
-
-    println!();
-    println!("Resultados:");
-    for item in &summary.results {
-        println!(
-            "- {} | target={} | findings={} | episodes={} | nodes={}",
-            item.job_id, item.target, item.drift_findings, item.episode_count, item.graph_nodes
-        );
     }
 }
