@@ -1,0 +1,43 @@
+cargo run -p atlas -- scan example.com
+
+cargo run -p atlas -- snapshot example.com
+cargo run -p atlas -- snapshot example.com --persist
+cargo run -p atlas -- snapshots example.com
+
+cargo run -p atlas -- timeline example.com
+
+cargo run -p atlas -- episodes example.com
+
+cargo run -p atlas -- graph example.com
+cargo run -p atlas -- graph-stats example.com
+
+cargo run -p atlas -- query example.com 'services technology=cloudflare'
+cargo run -p atlas -- query example.com 'EXPLAIN services connected_to=admin.example.com AND in_episode=true'
+cargo run -p atlas -- query example.com 'services technology=cloudflare EXPAND 1'
+cargo run -p atlas -- query example.com 'label=admin.example.com EXPAND 2'
+cargo run -p atlas -- query example.com 'NEIGHBORS label=example.com DEPTH 2'
+cargo run -p atlas -- query example.com 'NEIGHBORS services technology=cloudflare DEPTH 1'
+cargo run -p atlas -- query example.com 'PATH example.com -> cloudflare'
+cargo run -p atlas -- query example.com 'PATH admin.example.com -> "https://admin.example.com"'
+
+cargo run -p atlas -- history example.com
+cargo run -p atlas -- findings example.com
+
+cargo run -p atlas -- diff lab/old_snapshot.json lab/new_snapshot.json
+
+cargo run -p atlas -- drift lab/old_snapshot.json lab/new_snapshot.json
+cargo run -p atlas -- drift lab/old_snapshot.json lab/new_snapshot.json --policy lab/policy.json
+
+cargo run -p atlas -- export example.com --format json --output findings.json
+
+cargo run -p atlas -- query-save risky-admin 'services (title~admin OR label~admin) AND tls_enabled=false'
+cargo run -p atlas -- query-list
+cargo run -p atlas -- query-run risky-admin example.com
+cargo run -p atlas -- query-delete risky-admin
+
+cargo run -p atlas -- report example.com
+cargo run -p atlas -- report example.com --json --output report.json
+
+cargo run -p atlas -- rebuild example.com
+cargo run -p atlas -- rebuild example.com --persist
+
