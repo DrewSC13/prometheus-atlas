@@ -1,45 +1,16 @@
-mod error;
-mod handlers;
-mod router;
-mod state;
-
 use anyhow::Result;
+use atlas_api::{router::build_router, AppState};
 use atlas_config::AppConfig;
-use router::build_router;
-use state::AppState;
-use std::env;
-use std::path::PathBuf;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing::info;
 use tracing_subscriber::{fmt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = AppConfig::load_from_default_locations()?;
     config.validate()?;
-    init_tracing(&config)?;
 
-    let db_path = PathBuf::from(&config.storage.path);
-    let snapshot_dir = env::var("ATLAS_SNAPSHOT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(".snapshots"));
-
-    let bind_addr = env::var("ATLAS_API_BIND").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
-
-    let state = Arc::new(AppState::new(config, db_path, snapshot_dir));
-    state.open_store()?.initialize()?;
-
-    let app = build_router(state);
-    let listener = TcpListener::bind(&bind_addr).await?;
-
-    info!("atlas-api listening on http://{}", bind_addr);
-    axum::serve(listener, app).await?;
-
-    Ok(())
-}
-
-fn init_tracing(config: &AppConfig) -> Result<()> {
     let filter =
         EnvFilter::try_new(config.logging.level.clone()).unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -48,6 +19,15 @@ fn init_tracing(config: &AppConfig) -> Result<()> {
     } else {
         fmt().with_env_filter(filter).init();
     }
+
+    let state = Arc::new(AppState::new(config.clone())?);
+    let app = build_router(state);
+
+    let addr: SocketAddr = "0.0.0.0:3000".parse()?;
+    let listener = TcpListener::bind(addr).await?;
+
+    tracing::info!("atlas-api escuchando en {}", addr);
+    axum::serve(listener, app).await?;
 
     Ok(())
 }

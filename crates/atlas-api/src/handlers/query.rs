@@ -1,57 +1,51 @@
-use crate::error::ApiError;
-use crate::state::AppState;
-use axum::{extract::State, Json};
-use serde::Deserialize;
-use serde_json::json;
 use std::sync::Arc;
-use std::time::Instant;
 
-#[derive(Debug, Deserialize)]
-pub struct ExecuteQueryRequest {
-    pub target: String,
-    pub expression: String,
-    pub limit: Option<usize>,
-}
+use axum::{extract::State, Json};
+use serde_json::json;
 
-pub async fn execute_graph_query(
+use crate::{
+    auth::{scope_from_auth, AuthContext},
+    error::{ApiError, ApiResult},
+    models::{ApiEnvelope, QueryRequestBody},
+    state::AppState,
+};
+
+pub async fn run_query(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<ExecuteQueryRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    if request.target.trim().is_empty() {
-        return Err(ApiError::bad_request("target no puede estar vacío"));
-    }
+    auth: AuthContext,
+    Json(body): Json<QueryRequestBody>,
+) -> ApiResult<Json<ApiEnvelope<atlas_query::QueryResult>>> {
+    let scope = scope_from_auth(&auth);
+    let limit = body
+        .limit
+        .unwrap_or(state.config.pagination.default_limit)
+        .min(state.config.pagination.max_limit);
 
-    if request.expression.trim().is_empty() {
-        return Err(ApiError::bad_request("expression no puede estar vacía"));
-    }
-
-    let started = Instant::now();
-    let store = state.open_store()?;
-    store.initialize()?;
-
-    let graph = store.load_latest_graph(&request.target)?.ok_or_else(|| {
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| ApiError::internal("store lock"))?;
+    let graph = store.load_latest_graph_scoped(&scope, &body.target)?.ok_or_else(|| {
         ApiError::not_found(format!(
-            "no existe un grafo persistido para {}; ejecuta primero `atlas graph {} --persist` o persistencia equivalente",
-            request.target, request.target
+            "no existe un grafo persistido para {} en este tenant/project",
+            body.target
         ))
     })?;
 
-    let parsed = atlas_query::parse_query(&request.expression, request.limit.unwrap_or(25))
-        .map_err(ApiError::from)?;
-    let result = atlas_query::execute_query(&graph, &parsed).map_err(ApiError::from)?;
+    let query = atlas_query::parse_query(&body.expression, limit)?;
+    let result = atlas_query::execute_query(&graph, &query)?;
 
-    state.record_telemetry(
-        "api-query",
-        Some(&request.target),
-        started.elapsed().as_millis(),
+    store.record_audit_event_scoped(
+        &scope,
+        &auth.subject,
+        "query.run",
+        "graph",
+        Some(&body.target),
         &json!({
-            "expression": request.expression,
+            "expression": body.expression,
             "matches": result.summary.total_matches
         }),
     )?;
 
-    Ok(Json(json!({
-        "target": request.target,
-        "result": result
-    })))
+    Ok(Json(ApiEnvelope { data: result }))
 }

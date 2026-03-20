@@ -1,4 +1,3 @@
-use anyhow::Error as AnyhowError;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -8,45 +7,49 @@ use serde::Serialize;
 
 #[derive(Debug)]
 pub struct ApiError {
-    status: StatusCode,
-    message: String,
+    pub status: StatusCode,
+    pub code: &'static str,
+    pub message: String,
 }
 
 #[derive(Debug, Serialize)]
 struct ErrorBody {
-    error: String,
+    error: ErrorEnvelope,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorEnvelope {
+    code: String,
+    message: String,
 }
 
 impl ApiError {
-    pub fn new(status: StatusCode, message: impl Into<String>) -> Self {
+    pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
         Self {
             status,
+            code,
             message: message.into(),
         }
     }
 
     pub fn bad_request(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, message)
+        Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
+    }
+
+    pub fn unauthorized(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, "unauthorized", message)
+    }
+
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, "forbidden", message)
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::NOT_FOUND, message)
+        Self::new(StatusCode::NOT_FOUND, "not_found", message)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
-    }
-}
-
-impl From<AnyhowError> for ApiError {
-    fn from(value: AnyhowError) -> Self {
-        Self::internal(value.to_string())
-    }
-}
-
-impl From<std::io::Error> for ApiError {
-    fn from(value: std::io::Error) -> Self {
-        Self::internal(value.to_string())
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
     }
 }
 
@@ -55,9 +58,20 @@ impl IntoResponse for ApiError {
         (
             self.status,
             Json(ErrorBody {
-                error: self.message,
+                error: ErrorEnvelope {
+                    code: self.code.to_string(),
+                    message: self.message,
+                },
             }),
         )
             .into_response()
     }
 }
+
+impl From<anyhow::Error> for ApiError {
+    fn from(value: anyhow::Error) -> Self {
+        Self::internal(value.to_string())
+    }
+}
+
+pub type ApiResult<T> = Result<T, ApiError>;

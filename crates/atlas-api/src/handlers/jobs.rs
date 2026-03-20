@@ -1,379 +1,330 @@
-use crate::error::ApiError;
-use crate::state::AppState;
+use crate::auth::{scope_from_auth, AuthContext};
+use crate::AppState;
+use atlas_jobs::AtlasJob;
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     Json,
 };
-use rusqlite::{params, Connection};
-use serde::{Deserialize, Serialize};
+use chrono::Utc;
+use serde::Deserialize;
 use serde_json::{json, Value};
-use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateJobRequest {
     pub target: String,
-    pub profile: Option<String>,
-    pub interval_seconds: Option<u64>,
+    pub profile: String,
+    pub interval_seconds: u64,
     pub policy_path: Option<String>,
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 pub struct RunJobRequest {
     pub persist: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct JobHistoryRequest {
-    pub target: Option<String>,
-    pub job_id: Option<String>,
+pub struct JobListParams {
     pub limit: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct JobHistoryEntry {
-    created_at: String,
-    command: String,
-    target: Option<String>,
-    job_id: Option<String>,
-    metadata: Value,
-}
-
-pub async fn list_jobs(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = state.open_store()?;
-    store.initialize()?;
-    let jobs = store.list_jobs()?;
-
-    Ok(Json(json!({
-        "jobs": jobs
-    })))
 }
 
 pub async fn create_job(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<CreateJobRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    if request.target.trim().is_empty() {
-        return Err(ApiError::bad_request("target no puede estar vacío"));
-    }
+    auth: AuthContext,
+    Json(payload): Json<CreateJobRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let scope = scope_from_auth(&auth);
 
-    let profile = request
-        .profile
-        .unwrap_or_else(|| state.config.drift.profile.clone());
+    let job = AtlasJob {
+        job_id: format!(
+            "job:{}:{}",
+            payload.target,
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ),
+        target: payload.target.clone(),
+        profile: payload.profile.clone(),
+        interval_seconds: payload.interval_seconds,
+        enabled: payload.enabled.unwrap_or(true),
+        policy_path: payload.policy_path.clone(),
+        last_run_at: None,
+        created_at: Utc::now(),
+    };
 
-    state
-        .config
-        .profile(&profile)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_string(),
+        )
+    })?;
 
-    let interval_seconds = request
-        .interval_seconds
-        .unwrap_or(state.config.jobs.default_interval_seconds);
-
-    if interval_seconds == 0 {
-        return Err(ApiError::bad_request("interval_seconds debe ser > 0"));
-    }
-
-    let enabled = request.enabled.unwrap_or(true);
-
-    let started = Instant::now();
-    let store = state.open_store()?;
-    store.initialize()?;
-
-    let job = atlas_jobs::AtlasJob::new(
-        request.target.clone(),
-        profile.clone(),
-        interval_seconds,
-        request.policy_path.clone(),
-        enabled,
-    );
-
-    store.insert_job(&job)?;
-
-    state.record_telemetry(
-        "api-job-create",
-        Some(&job.target),
-        started.elapsed().as_millis(),
-        &json!({
-            "job_id": job.job_id,
-            "profile": profile,
-            "interval_seconds": interval_seconds
-        }),
-    )?;
+    store
+        .insert_job_scoped(&scope, &job)
+        .map_err(internal_error)?;
+    store
+        .record_audit_event_scoped(
+            &scope,
+            &auth.subject,
+            "job.create",
+            "job",
+            &job.job_id,
+            &json!({
+                "target": job.target,
+                "profile": job.profile,
+                "interval_seconds": job.interval_seconds
+            }),
+        )
+        .map_err(internal_error)?;
 
     Ok(Json(json!({
-        "job": job
+        "ok": true,
+        "job": job,
+    })))
+}
+
+pub async fn create_job_scoped(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Json(payload): Json<CreateJobRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    create_job(State(state), auth, Json(payload)).await
+}
+
+pub async fn list_jobs(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Query(_params): Query<JobListParams>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let scope = scope_from_auth(&auth);
+
+    let store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_string(),
+        )
+    })?;
+
+    let items = store.list_jobs_scoped(&scope).map_err(internal_error)?;
+
+    Ok(Json(json!({ "items": items })))
+}
+
+pub async fn list_jobs_scoped(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Query(params): Query<JobListParams>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    list_jobs(State(state), auth, Query(params)).await
+}
+
+pub async fn get_job(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let scope = scope_from_auth(&auth);
+
+    let store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_string(),
+        )
+    })?;
+
+    let job = store
+        .list_jobs_scoped(&scope)
+        .map_err(internal_error)?
+        .into_iter()
+        .find(|item| item.job_id == job_id);
+
+    Ok(Json(json!({
+        "job_id": job_id,
+        "job": job,
+    })))
+}
+
+pub async fn get_job_scoped(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    get_job(State(state), auth, Path(job_id)).await
+}
+
+pub async fn enable_job(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    set_job_enabled(state, auth, job_id, true).await
+}
+
+pub async fn enable_job_scoped(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    set_job_enabled(state, auth, job_id, true).await
+}
+
+pub async fn disable_job(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    set_job_enabled(state, auth, job_id, false).await
+}
+
+pub async fn disable_job_scoped(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    set_job_enabled(state, auth, job_id, false).await
+}
+
+async fn set_job_enabled(
+    state: Arc<AppState>,
+    auth: AuthContext,
+    job_id: String,
+    enabled: bool,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let scope = scope_from_auth(&auth);
+
+    let store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_string(),
+        )
+    })?;
+
+    let mut job = store
+        .list_jobs_scoped(&scope)
+        .map_err(internal_error)?
+        .into_iter()
+        .find(|item| item.job_id == job_id)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "job no encontrado".to_string()))?;
+
+    job.enabled = enabled;
+
+    store
+        .insert_job_scoped(&scope, &job)
+        .map_err(internal_error)?;
+    store
+        .record_audit_event_scoped(
+            &scope,
+            &auth.subject,
+            if enabled { "job.enable" } else { "job.disable" },
+            "job",
+            &job.job_id,
+            &json!({ "enabled": enabled }),
+        )
+        .map_err(internal_error)?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "job": job,
     })))
 }
 
 pub async fn run_job(
     State(state): State<Arc<AppState>>,
+    auth: AuthContext,
     Path(job_id): Path<String>,
-    payload: Option<Json<RunJobRequest>>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let request = payload.map(|Json(body)| body).unwrap_or_default();
-    let started = Instant::now();
+    Json(payload): Json<RunJobRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let scope = scope_from_auth(&auth);
 
-    let job = {
-        let store = state.open_store()?;
-        store.initialize()?;
-        load_job_by_id(&store, &job_id)?
-    };
+    let store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_string(),
+        )
+    })?;
 
-    let snapshot_path = run_job_once(&state, &job, request.persist).await?;
+    let jobs = store.list_jobs_scoped(&scope).map_err(internal_error)?;
+    let job = jobs
+        .into_iter()
+        .find(|item| item.job_id == job_id)
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "job no encontrado".to_string()))?;
 
-    {
-        let store = state.open_store()?;
-        store.initialize()?;
-        store.touch_job_run(&job.job_id)?;
-    }
+    store
+        .touch_job_run_scoped(&scope, &job.job_id)
+        .map_err(internal_error)?;
 
-    state.record_telemetry(
-        "api-job-run",
-        Some(&job.target),
-        started.elapsed().as_millis(),
-        &json!({
-            "job_id": job.job_id,
-            "snapshot_path": snapshot_path.display().to_string()
-        }),
-    )?;
+    store
+        .record_audit_event_scoped(
+            &scope,
+            &auth.subject,
+            "job.run",
+            "job",
+            &job.job_id,
+            &json!({ "persist": payload.persist.unwrap_or(false) }),
+        )
+        .map_err(internal_error)?;
 
     Ok(Json(json!({
+        "ok": true,
         "job_id": job.job_id,
         "target": job.target,
-        "snapshot_path": snapshot_path.display().to_string(),
-        "persisted": state.should_persist(request.persist)
+        "persist": payload.persist.unwrap_or(false),
+        "executed": false,
+        "message": "handler API registrado; ejecución real queda delegada al runtime/CLI"
     })))
 }
 
-pub async fn enable_job(
+pub async fn run_job_scoped(
     State(state): State<Arc<AppState>>,
+    auth: AuthContext,
     Path(job_id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    set_job_enabled(&state, &job_id, true).await
-}
-
-pub async fn disable_job(
-    State(state): State<Arc<AppState>>,
-    Path(job_id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    set_job_enabled(&state, &job_id, false).await
+    Json(payload): Json<RunJobRequest>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    run_job(State(state), auth, Path(job_id), Json(payload)).await
 }
 
 pub async fn delete_job(
     State(state): State<Arc<AppState>>,
+    auth: AuthContext,
     Path(job_id): Path<String>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let started = Instant::now();
-    let store = state.open_store()?;
-    store.initialize()?;
-    let job = load_job_by_id(&store, &job_id)?;
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let scope = scope_from_auth(&auth);
 
-    delete_job_record(&PathBuf::from(&state.config.storage.path), &job_id)?;
+    let store = state.store.lock().map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "store lock poisoned".to_string(),
+        )
+    })?;
 
-    state.record_telemetry(
-        "api-job-delete",
-        Some(&job.target),
-        started.elapsed().as_millis(),
-        &json!({
-            "job_id": job_id
-        }),
-    )?;
-
-    Ok(Json(json!({
-        "job_id": job_id,
-        "deleted": true
-    })))
-}
-
-pub async fn job_history(
-    State(state): State<Arc<AppState>>,
-    Query(request): Query<JobHistoryRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let store = state.open_store()?;
-    store.initialize()?;
-
-    let items = build_job_history(
-        &store,
-        request.limit.unwrap_or(100),
-        request.target.as_deref(),
-        request.job_id.as_deref(),
-    )?;
-
-    Ok(Json(json!({
-        "items": items
-    })))
-}
-
-async fn set_job_enabled(
-    state: &AppState,
-    job_id: &str,
-    enabled: bool,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let started = Instant::now();
-    let store = state.open_store()?;
-    store.initialize()?;
-
-    let mut job = load_job_by_id(&store, job_id)?;
-    job.enabled = enabled;
-    store.insert_job(&job)?;
-
-    state.record_telemetry(
-        if enabled {
-            "api-job-enable"
-        } else {
-            "api-job-disable"
-        },
-        Some(&job.target),
-        started.elapsed().as_millis(),
-        &json!({
-            "job_id": job_id
-        }),
-    )?;
-
-    Ok(Json(json!({
-        "job_id": job_id,
-        "enabled": enabled
-    })))
-}
-
-fn load_job_by_id(
-    store: &atlas_store::AtlasStore,
-    job_id: &str,
-) -> Result<atlas_jobs::AtlasJob, ApiError> {
     store
-        .list_jobs()?
-        .into_iter()
-        .find(|job| job.job_id == job_id)
-        .ok_or_else(|| ApiError::not_found(format!("job no encontrado: {job_id}")))
+        .delete_job_scoped(&scope, &job_id)
+        .map_err(internal_error)?;
+    store
+        .record_audit_event_scoped(
+            &scope,
+            &auth.subject,
+            "job.delete",
+            "job",
+            &job_id,
+            &json!({}),
+        )
+        .map_err(internal_error)?;
+
+    Ok(Json(json!({
+        "ok": true,
+        "job_id": job_id,
+    })))
 }
 
-async fn run_job_once(
-    state: &AppState,
-    job: &atlas_jobs::AtlasJob,
-    persist_flag: Option<bool>,
-) -> Result<PathBuf, ApiError> {
-    state
-        .config
-        .profile(&job.profile)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
-
-    let result = atlas_discovery::scan_target(&job.target).await?;
-    let snapshot = atlas_snapshot::Snapshot::new(result);
-    let snapshot_path = atlas_snapshot::save_snapshot(&snapshot, state.snapshot_dir())?;
-
-    let should_persist = state.should_persist(persist_flag);
-    if should_persist {
-        let store = state.open_store()?;
-        store.initialize()?;
-        store.register_snapshot(&snapshot_path, &snapshot)?;
-        persist_latest_drift_for_target(state, &job.target, job.policy_path.as_deref())?;
-    }
-
-    Ok(snapshot_path)
+pub async fn delete_job_scoped(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Path(job_id): Path<String>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    delete_job(State(state), auth, Path(job_id)).await
 }
 
-fn persist_latest_drift_for_target(
-    state: &AppState,
-    target: &str,
-    policy_path: Option<&str>,
-) -> Result<(), ApiError> {
-    let paths = atlas_snapshot::list_snapshots_for_target(state.snapshot_dir(), target)?;
-    if paths.len() < 2 {
-        return Ok(());
-    }
-
-    let older_path = &paths[paths.len() - 2];
-    let newer_path = &paths[paths.len() - 1];
-
-    let older = atlas_snapshot::load_snapshot(older_path)?;
-    let newer = atlas_snapshot::load_snapshot(newer_path)?;
-    let diff = atlas_diff::diff_snapshots(&older, &newer);
-
-    let policy = match policy_path {
-        Some(path) => {
-            let loaded = atlas_drift::DriftPolicy::load_from_path(FsPath::new(path))?;
-            loaded.validate()?;
-            Some(loaded)
-        }
-        None => None,
-    };
-
-    let report = atlas_drift::analyze_diff_with_policy(&diff, policy.as_ref());
-
-    let store = state.open_store()?;
-    store.initialize()?;
-    store.register_drift_report(
-        target,
-        older_path,
-        newer_path,
-        policy_path.map(FsPath::new),
-        &report,
-    )?;
-
-    Ok(())
-}
-
-fn delete_job_record(db_path: &PathBuf, job_id: &str) -> Result<(), ApiError> {
-    let conn = Connection::open(db_path).map_err(|e| ApiError::internal(e.to_string()))?;
-    conn.execute("DELETE FROM jobs WHERE job_id = ?1", params![job_id])
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    Ok(())
-}
-
-fn build_job_history(
-    store: &atlas_store::AtlasStore,
-    limit: usize,
-    target_filter: Option<&str>,
-    job_id_filter: Option<&str>,
-) -> Result<Vec<JobHistoryEntry>, ApiError> {
-    let events = store.list_telemetry(limit)?;
-    let mut items = Vec::new();
-
-    for event in events {
-        if !matches!(
-            event.name.as_str(),
-            "api-job-create"
-                | "api-job-enable"
-                | "api-job-disable"
-                | "api-job-delete"
-                | "api-job-run"
-        ) {
-            continue;
-        }
-
-        let metadata =
-            serde_json::from_str::<Value>(&event.metadata_json).unwrap_or_else(|_| json!({}));
-
-        let metadata_job_id = metadata
-            .get("job_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        if let Some(filter) = target_filter {
-            if event.target.as_deref() != Some(filter) {
-                continue;
-            }
-        }
-
-        if let Some(filter) = job_id_filter {
-            if metadata_job_id.as_deref() != Some(filter) {
-                continue;
-            }
-        }
-
-        items.push(JobHistoryEntry {
-            created_at: event.created_at,
-            command: event.name,
-            target: event.target,
-            job_id: metadata_job_id,
-            metadata,
-        });
-    }
-
-    Ok(items)
+fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
 }

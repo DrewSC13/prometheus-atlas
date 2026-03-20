@@ -1,52 +1,57 @@
-use crate::handlers::{drift, findings, jobs, query, scan, snapshot};
-use crate::state::AppState;
-use axum::{
-    routing::{delete, get, post},
-    Json, Router,
+use crate::{
+    handlers::{findings, graphs, jobs, queries, reports, snapshots, telemetry},
+    AppState,
 };
-use serde_json::json;
+use axum::{
+    routing::{get, post},
+    Router,
+};
 use std::sync::Arc;
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/scan", post(scan::scan_target))
+        .route("/v1/snapshots/:target", get(snapshots::list_snapshots))
+        .route("/v1/graphs/:target", get(graphs::get_graph))
+        .route("/v1/reports/:target", get(reports::get_report))
+        .route("/v1/findings/:target", get(findings::list_findings))
         .route(
-            "/snapshot",
-            get(snapshot::list_snapshots).post(snapshot::create_snapshot),
+            "/v1/findings/:target/current",
+            get(findings::list_current_findings),
         )
+        .route("/v1/findings/:finding_id/ack", post(findings::ack_finding))
         .route(
-            "/drift",
-            get(drift::list_drift_history).post(drift::run_drift),
-        )
-        .route("/findings", get(findings::list_findings))
-        .route("/findings/:finding_id/ack", post(findings::ack_finding))
-        .route(
-            "/findings/:finding_id/resolve",
+            "/v1/findings/:finding_id/resolve",
             post(findings::resolve_finding),
         )
         .route(
-            "/findings/:finding_id/accept",
+            "/v1/findings/:finding_id/accept",
             post(findings::accept_finding),
         )
         .route(
-            "/findings/:finding_id/assign",
+            "/v1/findings/:finding_id/assign",
             post(findings::assign_finding),
         )
-        .route("/findings/:finding_id/note", post(findings::note_finding))
-        .route("/query", post(query::execute_graph_query))
-        .route("/jobs", get(jobs::list_jobs).post(jobs::create_job))
-        .route("/jobs/history", get(jobs::job_history))
-        .route("/jobs/:job_id/run", post(jobs::run_job))
-        .route("/jobs/:job_id/enable", post(jobs::enable_job))
-        .route("/jobs/:job_id/disable", post(jobs::disable_job))
-        .route("/jobs/:job_id", delete(jobs::delete_job))
+        .route(
+            "/v1/findings/:finding_id/note",
+            post(findings::note_finding),
+        )
+        .route("/v1/jobs", get(jobs::list_jobs).post(jobs::create_job))
+        .route("/v1/jobs/:job_id", get(jobs::get_job))
+        .route("/v1/jobs/:job_id/enable", post(jobs::enable_job))
+        .route("/v1/jobs/:job_id/disable", post(jobs::disable_job))
+        .route("/v1/jobs/:job_id/run", post(jobs::run_job))
+        .route("/v1/jobs/:job_id/delete", post(jobs::delete_job))
+        .route(
+            "/v1/queries",
+            get(queries::list_queries).post(queries::save_query),
+        )
+        .route("/v1/queries/:name", get(queries::get_query))
+        .route("/v1/queries/:name/run/:target", get(queries::run_query))
+        .route("/v1/telemetry", get(telemetry::list_telemetry))
         .with_state(state)
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(json!({
-        "status": "ok",
-        "service": "atlas-api"
-    }))
+async fn health() -> &'static str {
+    "ok"
 }

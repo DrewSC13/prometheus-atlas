@@ -14,6 +14,28 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StorageScope {
+    pub tenant_id: String,
+    pub project_id: String,
+}
+
+impl StorageScope {
+    pub fn new(tenant_id: impl Into<String>, project_id: impl Into<String>) -> Self {
+        Self {
+            tenant_id: tenant_id.into(),
+            project_id: project_id.into(),
+        }
+    }
+
+    pub fn global() -> Self {
+        Self {
+            tenant_id: "default".to_string(),
+            project_id: "default".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     Json,
@@ -85,6 +107,19 @@ pub struct StoredTelemetryEvent {
     pub target: Option<String>,
     pub duration_ms: u128,
     pub metadata_json: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredAuditEvent {
+    pub audit_id: String,
+    pub tenant_id: String,
+    pub project_id: String,
+    pub actor: String,
+    pub action: String,
+    pub resource_type: String,
+    pub resource_id: String,
+    pub details_json: String,
     pub created_at: String,
 }
 
@@ -240,6 +275,18 @@ impl AtlasStore {
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS audit_events (
+                audit_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                details_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS jobs (
                 job_id TEXT PRIMARY KEY,
                 target TEXT NOT NULL,
@@ -337,6 +384,15 @@ impl AtlasStore {
     }
 
     pub fn register_snapshot(&self, path: &Path, snapshot: &Snapshot) -> Result<()> {
+        self.register_snapshot_scoped(&StorageScope::global(), path, snapshot)
+    }
+
+    pub fn register_snapshot_scoped(
+        &self,
+        _scope: &StorageScope,
+        path: &Path,
+        snapshot: &Snapshot,
+    ) -> Result<()> {
         let snapshot_id = format!(
             "{}:{}",
             snapshot.target,
@@ -375,6 +431,25 @@ impl AtlasStore {
 
     pub fn register_drift_report(
         &self,
+        target: &str,
+        older_snapshot: &Path,
+        newer_snapshot: &Path,
+        policy_path: Option<&Path>,
+        report: &DriftReport,
+    ) -> Result<()> {
+        self.register_drift_report_scoped(
+            &StorageScope::global(),
+            target,
+            older_snapshot,
+            newer_snapshot,
+            policy_path,
+            report,
+        )
+    }
+
+    pub fn register_drift_report_scoped(
+        &self,
+        _scope: &StorageScope,
         target: &str,
         older_snapshot: &Path,
         newer_snapshot: &Path,
@@ -480,6 +555,14 @@ impl AtlasStore {
     }
 
     pub fn list_history(&self, target: &str) -> Result<Vec<StoredHistoryItem>> {
+        self.list_history_scoped(&StorageScope::global(), target)
+    }
+
+    pub fn list_history_scoped(
+        &self,
+        _scope: &StorageScope,
+        target: &str,
+    ) -> Result<Vec<StoredHistoryItem>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -521,6 +604,16 @@ impl AtlasStore {
 
     pub fn list_findings(
         &self,
+        target: &str,
+        severity: Option<&str>,
+        state: Option<&str>,
+    ) -> Result<Vec<StoredFinding>> {
+        self.list_findings_scoped(&StorageScope::global(), target, severity, state)
+    }
+
+    pub fn list_findings_scoped(
+        &self,
+        _scope: &StorageScope,
         target: &str,
         severity: Option<&str>,
         state: Option<&str>,
@@ -757,6 +850,25 @@ impl AtlasStore {
         operational_state: Option<&str>,
         owner: Option<&str>,
     ) -> Result<Vec<StoredCurrentFinding>> {
+        self.list_current_findings_operational_scoped(
+            &StorageScope::global(),
+            target,
+            severity,
+            state,
+            operational_state,
+            owner,
+        )
+    }
+
+    pub fn list_current_findings_operational_scoped(
+        &self,
+        _scope: &StorageScope,
+        target: &str,
+        severity: Option<&str>,
+        state: Option<&str>,
+        operational_state: Option<&str>,
+        owner: Option<&str>,
+    ) -> Result<Vec<StoredCurrentFinding>> {
         let findings = self.list_findings(target, severity, state)?;
         let mut latest_by_finding: BTreeMap<String, StoredFinding> = BTreeMap::new();
 
@@ -835,6 +947,14 @@ impl AtlasStore {
     }
 
     pub fn list_snapshots(&self, target: &str) -> Result<Vec<StoredSnapshot>> {
+        self.list_snapshots_scoped(&StorageScope::global(), target)
+    }
+
+    pub fn list_snapshots_scoped(
+        &self,
+        _scope: &StorageScope,
+        target: &str,
+    ) -> Result<Vec<StoredSnapshot>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -904,6 +1024,14 @@ impl AtlasStore {
     }
 
     pub fn list_telemetry(&self, limit: usize) -> Result<Vec<StoredTelemetryEvent>> {
+        self.list_telemetry_scoped(&StorageScope::global(), limit)
+    }
+
+    pub fn list_telemetry_scoped(
+        &self,
+        _scope: &StorageScope,
+        limit: usize,
+    ) -> Result<Vec<StoredTelemetryEvent>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -932,6 +1060,122 @@ impl AtlasStore {
                 created_at: row_string(row, 5)?,
             })
         })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+        Ok(events)
+    }
+
+    pub fn record_audit_event(
+        &self,
+        actor: &str,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        details: &Value,
+    ) -> Result<()> {
+        self.record_audit_event_scoped(
+            &StorageScope::global(),
+            actor,
+            action,
+            resource_type,
+            resource_id,
+            details,
+        )
+    }
+
+    pub fn record_audit_event_scoped(
+        &self,
+        scope: &StorageScope,
+        actor: &str,
+        action: &str,
+        resource_type: &str,
+        resource_id: &str,
+        details: &Value,
+    ) -> Result<()> {
+        let audit_id = format!(
+            "{}:{}:{}",
+            action,
+            resource_id,
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+
+        self.conn.execute(
+            r#"
+            INSERT INTO audit_events (
+                audit_id,
+                tenant_id,
+                project_id,
+                actor,
+                action,
+                resource_type,
+                resource_id,
+                details_json,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "#,
+            params![
+                audit_id,
+                scope.tenant_id,
+                scope.project_id,
+                actor,
+                action,
+                resource_type,
+                resource_id,
+                serde_json::to_string(details)?,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn list_audit_events(&self, limit: usize) -> Result<Vec<StoredAuditEvent>> {
+        self.list_audit_events_scoped(&StorageScope::global(), limit)
+    }
+
+    pub fn list_audit_events_scoped(
+        &self,
+        scope: &StorageScope,
+        limit: usize,
+    ) -> Result<Vec<StoredAuditEvent>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                audit_id,
+                tenant_id,
+                project_id,
+                actor,
+                action,
+                resource_type,
+                resource_id,
+                details_json,
+                created_at
+            FROM audit_events
+            WHERE tenant_id = ?1 AND project_id = ?2
+            ORDER BY created_at DESC
+            LIMIT ?3
+            "#,
+        )?;
+
+        let rows = stmt.query_map(
+            params![scope.tenant_id, scope.project_id, limit as i64],
+            |row| {
+                Ok(StoredAuditEvent {
+                    audit_id: row_string(row, 0)?,
+                    tenant_id: row_string(row, 1)?,
+                    project_id: row_string(row, 2)?,
+                    actor: row_string(row, 3)?,
+                    action: row_string(row, 4)?,
+                    resource_type: row_string(row, 5)?,
+                    resource_id: row_string(row, 6)?,
+                    details_json: row_string(row, 7)?,
+                    created_at: row_string(row, 8)?,
+                })
+            },
+        )?;
 
         let mut events = Vec::new();
         for row in rows {
@@ -998,6 +1242,10 @@ impl AtlasStore {
     }
 
     pub fn list_jobs(&self) -> Result<Vec<AtlasJob>> {
+        self.list_jobs_scoped(&StorageScope::global())
+    }
+
+    pub fn list_jobs_scoped(&self, _scope: &StorageScope) -> Result<Vec<AtlasJob>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -1040,6 +1288,10 @@ impl AtlasStore {
     }
 
     pub fn insert_job(&self, job: &AtlasJob) -> Result<()> {
+        self.insert_job_scoped(&StorageScope::global(), job)
+    }
+
+    pub fn insert_job_scoped(&self, _scope: &StorageScope, job: &AtlasJob) -> Result<()> {
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO jobs (
@@ -1069,6 +1321,10 @@ impl AtlasStore {
     }
 
     pub fn touch_job_run(&self, job_id: &str) -> Result<()> {
+        self.touch_job_run_scoped(&StorageScope::global(), job_id)
+    }
+
+    pub fn touch_job_run_scoped(&self, _scope: &StorageScope, job_id: &str) -> Result<()> {
         self.conn.execute(
             r#"
             UPDATE jobs
@@ -1078,6 +1334,17 @@ impl AtlasStore {
             params![Utc::now().to_rfc3339(), job_id],
         )?;
 
+        Ok(())
+    }
+
+    pub fn delete_job_scoped(&self, _scope: &StorageScope, job_id: &str) -> Result<()> {
+        self.conn.execute(
+            r#"
+            DELETE FROM jobs
+            WHERE job_id = ?1
+            "#,
+            params![job_id],
+        )?;
         Ok(())
     }
 
@@ -1125,6 +1392,15 @@ impl AtlasStore {
     }
 
     pub fn store_episodes(&self, target: &str, episodes: &[RiskEpisode]) -> Result<()> {
+        self.store_episodes_scoped(&StorageScope::global(), target, episodes)
+    }
+
+    pub fn store_episodes_scoped(
+        &self,
+        _scope: &StorageScope,
+        target: &str,
+        episodes: &[RiskEpisode],
+    ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
 
         for episode in episodes {
@@ -1174,6 +1450,14 @@ impl AtlasStore {
     }
 
     pub fn list_episodes(&self, target: &str) -> Result<Vec<StoredEpisode>> {
+        self.list_episodes_scoped(&StorageScope::global(), target)
+    }
+
+    pub fn list_episodes_scoped(
+        &self,
+        _scope: &StorageScope,
+        target: &str,
+    ) -> Result<Vec<StoredEpisode>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -1229,6 +1513,15 @@ impl AtlasStore {
     }
 
     pub fn store_graph(&self, target: &str, graph: &ExposureGraph) -> Result<()> {
+        self.store_graph_scoped(&StorageScope::global(), target, graph)
+    }
+
+    pub fn store_graph_scoped(
+        &self,
+        _scope: &StorageScope,
+        target: &str,
+        graph: &ExposureGraph,
+    ) -> Result<()> {
         let graph_id = format!(
             "{}:{}",
             target,
@@ -1338,6 +1631,14 @@ impl AtlasStore {
     }
 
     pub fn list_graphs(&self, target: &str) -> Result<Vec<StoredGraphRecord>> {
+        self.list_graphs_scoped(&StorageScope::global(), target)
+    }
+
+    pub fn list_graphs_scoped(
+        &self,
+        _scope: &StorageScope,
+        target: &str,
+    ) -> Result<Vec<StoredGraphRecord>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -1375,6 +1676,14 @@ impl AtlasStore {
     }
 
     pub fn load_latest_graph(&self, target: &str) -> Result<Option<ExposureGraph>> {
+        self.load_latest_graph_scoped(&StorageScope::global(), target)
+    }
+
+    pub fn load_latest_graph_scoped(
+        &self,
+        _scope: &StorageScope,
+        target: &str,
+    ) -> Result<Option<ExposureGraph>> {
         let graph_row = self.conn.query_row(
             r#"
             SELECT graph_id, generated_at
@@ -1487,6 +1796,15 @@ impl AtlasStore {
     }
 
     pub fn save_saved_query(&self, name: &str, expression: &str) -> Result<()> {
+        self.save_saved_query_scoped(&StorageScope::global(), name, expression)
+    }
+
+    pub fn save_saved_query_scoped(
+        &self,
+        _scope: &StorageScope,
+        name: &str,
+        expression: &str,
+    ) -> Result<()> {
         let now = Utc::now().to_rfc3339();
 
         self.conn.execute(
@@ -1508,6 +1826,13 @@ impl AtlasStore {
     }
 
     pub fn list_saved_queries(&self) -> Result<Vec<StoredSavedQuery>> {
+        self.list_saved_queries_scoped(&StorageScope::global())
+    }
+
+    pub fn list_saved_queries_scoped(
+        &self,
+        _scope: &StorageScope,
+    ) -> Result<Vec<StoredSavedQuery>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -1538,6 +1863,14 @@ impl AtlasStore {
     }
 
     pub fn load_saved_query(&self, name: &str) -> Result<Option<StoredSavedQuery>> {
+        self.load_saved_query_scoped(&StorageScope::global(), name)
+    }
+
+    pub fn load_saved_query_scoped(
+        &self,
+        _scope: &StorageScope,
+        name: &str,
+    ) -> Result<Option<StoredSavedQuery>> {
         let result = self.conn.query_row(
             r#"
             SELECT
@@ -1567,6 +1900,10 @@ impl AtlasStore {
     }
 
     pub fn delete_saved_query(&self, name: &str) -> Result<()> {
+        self.delete_saved_query_scoped(&StorageScope::global(), name)
+    }
+
+    pub fn delete_saved_query_scoped(&self, _scope: &StorageScope, name: &str) -> Result<()> {
         self.conn.execute(
             r#"
             DELETE FROM saved_queries
@@ -2149,6 +2486,35 @@ impl AtlasStore {
             ),
         )?;
 
+        self.repair_table_if_needed(
+            "audit_events",
+            &[
+                ("audit_id", "TEXT"),
+                ("tenant_id", "TEXT"),
+                ("project_id", "TEXT"),
+                ("actor", "TEXT"),
+                ("action", "TEXT"),
+                ("resource_type", "TEXT"),
+                ("resource_id", "TEXT"),
+                ("details_json", "TEXT"),
+                ("created_at", "TEXT"),
+            ],
+            r#"
+            CREATE TABLE audit_events (
+                audit_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL,
+                resource_type TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                details_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            "#,
+            None,
+        )?;
+
         Ok(())
     }
 
@@ -2429,5 +2795,34 @@ mod tests {
         assert_eq!(state.operational_state, "acknowledged");
         assert_eq!(state.owner.as_deref(), Some("claudio"));
         assert_eq!(state.notes.as_deref(), Some("en revisión"));
+    }
+
+    #[test]
+    fn records_scoped_audit_event() {
+        let db_path = std::env::temp_dir().join(format!(
+            "atlas-store-audit-test-{}.db",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+
+        let store = AtlasStore::open(&db_path).unwrap();
+        store.initialize().unwrap();
+
+        let scope = StorageScope::new("tenant-a", "project-x");
+
+        store
+            .record_audit_event_scoped(
+                &scope,
+                "claudio",
+                "finding.ack",
+                "finding",
+                "f-123",
+                &serde_json::json!({"state": "acknowledged"}),
+            )
+            .unwrap();
+
+        let events = store.list_audit_events_scoped(&scope, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].tenant_id, "tenant-a");
+        assert_eq!(events[0].project_id, "project-x");
     }
 }

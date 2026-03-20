@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,11 @@ pub struct AppConfig {
     pub plugins: PluginConfig,
     pub jobs: JobConfig,
     pub profiles: Vec<ScanProfile>,
+    pub server: ServerConfig,
+    pub auth: AuthConfig,
+    pub saas: SaasConfig,
+    pub pagination: PaginationConfig,
+    pub alerts: AlertConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +58,50 @@ pub struct ScanProfile {
     pub timeout_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServerConfig {
+    pub bind: String,
+    pub request_timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthConfig {
+    pub issuer: String,
+    pub jwt_secret: String,
+    pub jwt_expiration_seconds: u64,
+    pub bootstrap_token: String,
+    pub api_keys: Vec<ApiKeyConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyConfig {
+    pub key_id: String,
+    pub secret: String,
+    pub tenant_id: String,
+    pub project_id: String,
+    pub role: String,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SaasConfig {
+    pub default_tenant_id: String,
+    pub default_project_id: String,
+    pub default_environment: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginationConfig {
+    pub default_limit: usize,
+    pub max_limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertConfig {
+    pub enabled: bool,
+    pub default_severity_threshold: String,
+}
+
 impl AppConfig {
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let content = fs::read_to_string(path)?;
@@ -86,6 +135,34 @@ impl AppConfig {
             bail!("jobs.default_interval_seconds debe ser > 0");
         }
 
+        if self.server.bind.trim().is_empty() {
+            bail!("server.bind no puede estar vacío");
+        }
+
+        if self.auth.jwt_secret.trim().len() < 16 {
+            bail!("auth.jwt_secret debe tener al menos 16 caracteres");
+        }
+
+        if self.auth.bootstrap_token.trim().is_empty() {
+            bail!("auth.bootstrap_token no puede estar vacío");
+        }
+
+        if self.pagination.default_limit == 0 {
+            bail!("pagination.default_limit debe ser > 0");
+        }
+
+        if self.pagination.max_limit < self.pagination.default_limit {
+            bail!("pagination.max_limit debe ser >= pagination.default_limit");
+        }
+
+        if self.saas.default_tenant_id.trim().is_empty() {
+            bail!("saas.default_tenant_id no puede estar vacío");
+        }
+
+        if self.saas.default_project_id.trim().is_empty() {
+            bail!("saas.default_project_id no puede estar vacío");
+        }
+
         Ok(())
     }
 
@@ -93,7 +170,7 @@ impl AppConfig {
         self.profiles
             .iter()
             .find(|p| p.name == name)
-            .ok_or_else(|| anyhow::anyhow!("profile no encontrado: {name}"))
+            .ok_or_else(|| anyhow!("profile no encontrado: {name}"))
     }
 }
 
@@ -128,6 +205,37 @@ impl Default for AppConfig {
                     timeout_ms: 5000,
                 },
             ],
+            server: ServerConfig {
+                bind: "0.0.0.0:8080".to_string(),
+                request_timeout_ms: 30_000,
+            },
+            auth: AuthConfig {
+                issuer: "prometheus-atlas".to_string(),
+                jwt_secret: "change-me-super-secret-atlas-key".to_string(),
+                jwt_expiration_seconds: 86_400,
+                bootstrap_token: "atlas-bootstrap-admin".to_string(),
+                api_keys: vec![ApiKeyConfig {
+                    key_id: "local-admin".to_string(),
+                    secret: "atlas-local-admin-key".to_string(),
+                    tenant_id: "local".to_string(),
+                    project_id: "default".to_string(),
+                    role: "admin".to_string(),
+                    enabled: true,
+                }],
+            },
+            saas: SaasConfig {
+                default_tenant_id: "local".to_string(),
+                default_project_id: "default".to_string(),
+                default_environment: "local".to_string(),
+            },
+            pagination: PaginationConfig {
+                default_limit: 25,
+                max_limit: 200,
+            },
+            alerts: AlertConfig {
+                enabled: true,
+                default_severity_threshold: "medium".to_string(),
+            },
         }
     }
 }

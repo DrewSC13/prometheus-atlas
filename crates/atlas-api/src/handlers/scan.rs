@@ -1,31 +1,35 @@
-use crate::error::ApiError;
-use crate::state::AppState;
-use axum::{extract::State, Json};
-use serde::Deserialize;
-use serde_json::json;
 use std::sync::Arc;
-use std::time::Instant;
 
-#[derive(Debug, Deserialize)]
-pub struct ScanRequest {
-    pub target: String,
-}
+use axum::{extract::State, Json};
+use serde_json::json;
 
-pub async fn scan_target(
+use crate::{
+    auth::{scope_from_auth, AuthContext},
+    error::ApiResult,
+    models::{ApiEnvelope, ScanRequest},
+    state::AppState,
+};
+
+pub async fn scan(
     State(state): State<Arc<AppState>>,
-    Json(request): Json<ScanRequest>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    if request.target.trim().is_empty() {
-        return Err(ApiError::bad_request("target no puede estar vacío"));
-    }
+    auth: AuthContext,
+    Json(body): Json<ScanRequest>,
+) -> ApiResult<Json<ApiEnvelope<atlas_core::ScanResult>>> {
+    auth.require_write()?;
+    let result = atlas_discovery::scan_target(&body.target).await?;
 
-    let started = Instant::now();
-    let result = atlas_discovery::scan_target(&request.target).await?;
+    let scope = scope_from_auth(&auth);
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| crate::error::ApiError::internal("store lock"))?;
 
-    state.record_telemetry(
-        "api-scan",
-        Some(&result.target),
-        started.elapsed().as_millis(),
+    store.record_audit_event_scoped(
+        &scope,
+        &auth.subject,
+        "scan.execute",
+        "target",
+        Some(&body.target),
         &json!({
             "resolved_ips": result.resolved_ips.len(),
             "subdomains": result.subdomains.len(),
@@ -33,8 +37,5 @@ pub async fn scan_target(
         }),
     )?;
 
-    Ok(Json(json!({
-        "target": result.target,
-        "result": result
-    })))
+    Ok(Json(ApiEnvelope { data: result }))
 }
