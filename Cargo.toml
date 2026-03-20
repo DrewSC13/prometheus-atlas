@@ -15,6 +15,7 @@ members = [
     "crates/atlas-output",
     "crates/atlas-plugins",
     "crates/atlas-query",
+    "crates/atlas-report",
     "crates/atlas-scheduler",
     "crates/atlas-snapshot",
     "crates/atlas-store",

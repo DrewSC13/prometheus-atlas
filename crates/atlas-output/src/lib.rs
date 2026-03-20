@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use atlas_core::ScanResult;
 use atlas_graph::ExposureGraph;
 use atlas_query::{GraphStatsReport, QueryResult};
+use atlas_report::ExecutiveReport;
 use std::fs;
 use std::path::Path;
 
@@ -132,7 +133,24 @@ pub fn print_human_query_result(result: &QueryResult) {
     println!("Target: {}", result.target);
     println!("Query: {}", result.raw_query);
     println!("Matches: {}", result.summary.total_matches);
+    println!("Returned: {}", result.summary.returned_matches);
     println!("Max degree: {}", result.summary.max_degree);
+
+    if result.limit > 0 {
+        println!("Limit: {}", result.limit);
+    }
+
+    if result.offset > 0 {
+        println!("Offset: {}", result.offset);
+    }
+
+    if let Some(sort) = &result.sort {
+        println!("Sort: {} {}", sort.field, sort.direction);
+    }
+
+    if result.explain {
+        println!("Explain: true");
+    }
 
     if !result.summary.kind_counts.is_empty() {
         println!();
@@ -160,6 +178,139 @@ pub fn print_human_query_result(result: &QueryResult) {
             for (key, value) in &node.attributes {
                 println!("      {}={}", key, value);
             }
+        }
+
+        if !node.explanations.is_empty() {
+            for explanation in &node.explanations {
+                println!("      why: {}", explanation);
+            }
+        }
+    }
+}
+
+pub fn print_human_executive_report(report: &ExecutiveReport) {
+    println!("Target: {}", report.target);
+    println!("Generated at: {}", report.generated_at);
+    println!("Snapshots: {}", report.snapshot_count);
+
+    if let Some(latest) = report.latest_snapshot_at {
+        println!("Latest snapshot: {}", latest);
+    }
+
+    println!(
+        "Policy applied: {}",
+        if report.policy_applied { "yes" } else { "no" }
+    );
+
+    println!();
+    println!("Resumen ejecutivo:");
+    println!("  - Score acumulado: {}", report.overview.total_score);
+    println!("  - Severidad global: {}", report.overview.overall_severity);
+    println!(
+        "  - Hallazgos acumulados: {}",
+        report.overview.total_findings
+    );
+    println!(
+        "  - Recursos únicos afectados: {}",
+        report.overview.unique_resources
+    );
+    println!(
+        "  - Hallazgos críticos: {}",
+        report.overview.critical_findings
+    );
+    println!(
+        "  - Hallazgos recurrentes: {}",
+        report.overview.recurring_findings
+    );
+    println!(
+        "  - Hallazgos persistentes: {}",
+        report.overview.persistent_findings
+    );
+
+    println!();
+    println!("Resumen de grafo:");
+    println!("  - Nodes: {}", report.graph.node_count);
+    println!("  - Edges: {}", report.graph.edge_count);
+    println!("  - Connected nodes: {}", report.graph.connected_nodes);
+    println!("  - Isolated nodes: {}", report.graph.isolated_nodes);
+    println!("  - Max degree: {}", report.graph.max_degree);
+
+    if !report.graph.highest_degree_labels.is_empty() {
+        println!("  - Hubs:");
+        for label in &report.graph.highest_degree_labels {
+            println!("      {}", label);
+        }
+    }
+
+    println!();
+    println!("Resumen de episodios:");
+    println!("  - Total episodes: {}", report.episodes.total_episodes);
+
+    if !report.episodes.by_state.is_empty() {
+        println!("  - By state:");
+        for (state, count) in &report.episodes.by_state {
+            println!("      {}: {}", state, count);
+        }
+    }
+
+    if !report.episodes.by_kind.is_empty() {
+        println!("  - By kind:");
+        for (kind, count) in &report.episodes.by_kind {
+            println!("      {}: {}", kind, count);
+        }
+    }
+
+    if !report.top_findings.is_empty() {
+        println!();
+        println!("Top findings:");
+        for finding in &report.top_findings {
+            println!(
+                "  - [{}] {} | resource={} | category={} | state={} | score={}",
+                finding.severity,
+                finding.title,
+                finding.resource,
+                finding.category,
+                finding.state,
+                finding.score
+            );
+        }
+    }
+
+    if !report.hotspots.is_empty() {
+        println!();
+        println!("Hotspots:");
+        for hotspot in &report.hotspots {
+            println!(
+                "  - {} | score={} | occurrences={}",
+                hotspot.resource, hotspot.total_score, hotspot.occurrences
+            );
+            if !hotspot.categories.is_empty() {
+                println!("      categories={}", hotspot.categories.join(", "));
+            }
+        }
+    }
+
+    if !report.episodes.top_episodes.is_empty() {
+        println!();
+        println!("Top episodes:");
+        for episode in &report.episodes.top_episodes {
+            println!(
+                "  - [{}] {} | kind={} | score={} | state={} | resources={}",
+                episode.severity,
+                episode.title,
+                episode.kind,
+                episode.score,
+                episode.state,
+                episode.resource_count
+            );
+        }
+    }
+
+    if !report.recommendations.is_empty() {
+        println!();
+        println!("Recomendaciones:");
+        for recommendation in &report.recommendations {
+            println!("  - {}", recommendation);
         }
     }
 }

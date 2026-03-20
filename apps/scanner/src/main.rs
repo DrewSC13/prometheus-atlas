@@ -4,6 +4,7 @@ use atlas_plugins::default_registry_for;
 use atlas_query::{
     build_graph_stats_report, execute_query, graph_search, parse_query, GraphSearchRequest,
 };
+use atlas_report::build_executive_report;
 use atlas_store::{AtlasStore, ExportFormat};
 use clap::{Parser, Subcommand};
 use serde_json::json;
@@ -180,19 +181,14 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    QuerySave {
-        name: String,
-        expression: String,
-    },
-
-    QueryList,
-
-    QueryRun {
-        name: String,
+    Report {
         target: String,
 
-        #[arg(long, default_value_t = 25)]
-        limit: usize,
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+
+        #[arg(long)]
+        policy: Option<PathBuf>,
 
         #[arg(long)]
         json: bool,
@@ -201,8 +197,23 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
-    QueryDelete {
-        name: String,
+    Rebuild {
+        target: String,
+
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        #[arg(long)]
+        persist: bool,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 
     History {
@@ -248,6 +259,19 @@ enum Commands {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+}
+
+#[derive(Debug, Clone)]
+struct LoadedSnapshotInput {
+    path: PathBuf,
+    snapshot: atlas_snapshot::Snapshot,
+}
+
+struct AnalysisBundle {
+    snapshot_inputs: Vec<LoadedSnapshotInput>,
+    timeline: Option<atlas_drift::TimelineReport>,
+    episodes: Option<atlas_episodes::EpisodeCollection>,
+    graph: atlas_graph::ExposureGraph,
 }
 
 #[tokio::main]
@@ -655,9 +679,7 @@ async fn main() -> Result<()> {
             store.initialize()?;
             let graph = require_latest_graph(&store, &target)?;
 
-            let mut query = parse_query(&expression, limit)?;
-            query.limit = limit;
-
+            let query = parse_query(&expression, limit)?;
             let result = execute_query(&graph, &query)?;
 
             if want_json {
@@ -679,74 +701,150 @@ async fn main() -> Result<()> {
             )?;
         }
 
-        Commands::QuerySave { name, expression } => {
-            let store = AtlasStore::open(Path::new(&config.storage.path))?;
-            store.initialize()?;
-            store.save_saved_query(&name, &expression)?;
-            println!("Query guardada: {name}");
-        }
-
-        Commands::QueryList => {
-            let store = AtlasStore::open(Path::new(&config.storage.path))?;
-            store.initialize()?;
-            let queries = store.list_saved_queries()?;
-
-            if queries.is_empty() {
-                println!("No hay queries guardadas.");
-            } else {
-                println!("Queries guardadas:");
-                for item in queries {
-                    println!("- {} | {}", item.name, item.expression);
-                }
-            }
-        }
-
-        Commands::QueryRun {
-            name,
+        Commands::Report {
             target,
-            limit,
+            dir,
+            policy,
             json: want_json,
             output,
         } => {
             let started = Instant::now();
-            let store = AtlasStore::open(Path::new(&config.storage.path))?;
-            store.initialize()?;
+            let bundle = build_analysis_bundle(&config, &target, &dir, policy.as_deref())?;
 
-            let saved = store
-                .load_saved_query(&name)?
-                .ok_or_else(|| anyhow::anyhow!("no existe la query guardada: {name}"))?;
+            let snapshots = bundle
+                .snapshot_inputs
+                .iter()
+                .map(|item| item.snapshot.clone())
+                .collect::<Vec<_>>();
 
-            let graph = require_latest_graph(&store, &target)?;
-            let mut query = parse_query(&saved.expression, limit)?;
-            query.limit = limit;
-
-            let result = execute_query(&graph, &query)?;
+            let report = build_executive_report(
+                &target,
+                &snapshots,
+                bundle.timeline.as_ref(),
+                bundle.episodes.as_ref(),
+                &bundle.graph,
+                policy.is_some(),
+            );
 
             if want_json {
-                atlas_output::write_json_output(&result, output.as_deref())?;
+                atlas_output::write_json_output(&report, output.as_deref())?;
             } else {
-                println!("Saved query: {}", saved.name);
-                atlas_output::print_human_query_result(&result);
+                atlas_output::print_human_executive_report(&report);
             }
 
+            let store = AtlasStore::open(Path::new(&config.storage.path)).ok();
             record_telemetry_if_enabled(
                 &config,
-                Some(&store),
-                "query-run",
+                store.as_ref(),
+                "report",
                 Some(&target),
                 started.elapsed().as_millis(),
                 json!({
-                    "saved_query": name,
-                    "matches": result.summary.total_matches
+                    "snapshots": report.snapshot_count,
+                    "findings": report.overview.total_findings,
+                    "score": report.overview.total_score
                 }),
             )?;
         }
 
-        Commands::QueryDelete { name } => {
-            let store = AtlasStore::open(Path::new(&config.storage.path))?;
-            store.initialize()?;
-            store.delete_saved_query(&name)?;
-            println!("Query eliminada: {name}");
+        Commands::Rebuild {
+            target,
+            dir,
+            policy,
+            persist,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let bundle = build_analysis_bundle(&config, &target, &dir, policy.as_deref())?;
+            let should_persist = persist || config.drift.persist_by_default;
+
+            let transitions = bundle
+                .timeline
+                .as_ref()
+                .map(|timeline| timeline.transition_count)
+                .unwrap_or(0);
+
+            let episodes = bundle
+                .episodes
+                .as_ref()
+                .map(|collection| collection.episode_count)
+                .unwrap_or(0);
+
+            if should_persist {
+                let store = AtlasStore::open(Path::new(&config.storage.path))?;
+                store.initialize()?;
+
+                for item in &bundle.snapshot_inputs {
+                    store.register_snapshot(&item.path, &item.snapshot)?;
+                }
+
+                if let Some(timeline) = &bundle.timeline {
+                    for (pair, transition) in bundle
+                        .snapshot_inputs
+                        .windows(2)
+                        .zip(timeline.transitions.iter())
+                    {
+                        let older = &pair[0];
+                        let newer = &pair[1];
+                        store.register_drift_report(
+                            &target,
+                            &older.path,
+                            &newer.path,
+                            policy.as_deref(),
+                            &transition.report,
+                        )?;
+                    }
+                }
+
+                if let Some(collection) = &bundle.episodes {
+                    store.store_episodes(&target, &collection.episodes)?;
+                }
+
+                store.store_graph(&target, &bundle.graph)?;
+            }
+
+            let summary = json!({
+                "target": target,
+                "snapshots": bundle.snapshot_inputs.len(),
+                "transitions": transitions,
+                "episodes": episodes,
+                "graph_nodes": bundle.graph.node_count,
+                "graph_edges": bundle.graph.edge_count,
+                "persisted": should_persist
+            });
+
+            if want_json {
+                atlas_output::write_json_output(&summary, output.as_deref())?;
+            } else {
+                println!("Rebuild completado para {}", target);
+                println!("  - Snapshots: {}", bundle.snapshot_inputs.len());
+                println!("  - Transitions: {}", transitions);
+                println!("  - Episodes: {}", episodes);
+                println!("  - Graph nodes: {}", bundle.graph.node_count);
+                println!("  - Graph edges: {}", bundle.graph.edge_count);
+                println!(
+                    "  - Persisted: {}",
+                    if should_persist { "yes" } else { "no" }
+                );
+            }
+
+            let store = AtlasStore::open(Path::new(&config.storage.path)).ok();
+            record_telemetry_if_enabled(
+                &config,
+                store.as_ref(),
+                "rebuild",
+                Some(&target),
+                started.elapsed().as_millis(),
+                json!({
+                    "snapshots": bundle.snapshot_inputs.len(),
+                    "transitions": transitions,
+                    "episodes": episodes,
+                    "graph_nodes": bundle.graph.node_count,
+                    "graph_edges": bundle.graph.edge_count,
+                    "persisted": should_persist
+                }),
+            )?;
         }
 
         Commands::History { target } => {
@@ -884,46 +982,81 @@ fn build_graph_from_snapshots_and_context(
     dir: &Path,
     policy_path: Option<&Path>,
 ) -> Result<atlas_graph::ExposureGraph> {
-    let snapshots = atlas_snapshot::load_all_snapshots_for_target(dir, target)?;
-    if snapshots.is_empty() {
-        bail!("no hay snapshots para construir el grafo de {target}");
+    let bundle = build_analysis_bundle(config, target, dir, policy_path)?;
+    Ok(bundle.graph)
+}
+
+fn build_analysis_bundle(
+    config: &AppConfig,
+    target: &str,
+    dir: &Path,
+    policy_path: Option<&Path>,
+) -> Result<AnalysisBundle> {
+    let snapshot_inputs = load_snapshot_inputs_for_target(dir, target)?;
+    if snapshot_inputs.is_empty() {
+        bail!("no hay snapshots para construir análisis de {target}");
     }
 
-    let latest_snapshot = snapshots.last().cloned();
+    let latest_snapshot = snapshot_inputs.last().map(|item| item.snapshot.clone());
     let policy_loaded = load_policy(policy_path)?;
 
-    let mut maybe_timeline = None;
-    let mut maybe_collection = None;
+    let mut timeline = None;
+    let mut episodes = None;
 
-    if snapshots.len() >= 2 {
-        let mut timeline =
+    if snapshot_inputs.len() >= 2 {
+        let snapshots = snapshot_inputs
+            .iter()
+            .map(|item| item.snapshot.clone())
+            .collect::<Vec<_>>();
+
+        let mut built_timeline =
             atlas_drift::build_timeline_report(target, &snapshots, policy_loaded.as_ref())?;
 
         let registry = default_registry_for(&config.plugins.enabled);
-        registry.apply_timeline_report(&mut timeline);
+        registry.apply_timeline_report(&mut built_timeline);
 
         let mut clusters_by_transition = Vec::new();
-        for transition in &timeline.transitions {
+        for transition in &built_timeline.transitions {
             let clusters = atlas_correlation::correlate_report(&transition.report)?;
             clusters_by_transition.push(clusters);
         }
 
-        let collection = atlas_episodes::build_episodes_for_timeline(
+        let built_episodes = atlas_episodes::build_episodes_for_timeline(
             target,
-            &timeline,
+            &built_timeline,
             &clusters_by_transition,
         )?;
 
-        maybe_timeline = Some(timeline);
-        maybe_collection = Some(collection);
+        timeline = Some(built_timeline);
+        episodes = Some(built_episodes);
     }
 
-    Ok(atlas_graph::build_full_graph(
+    let graph = atlas_graph::build_full_graph(
         target,
         latest_snapshot.as_ref(),
-        maybe_timeline.as_ref(),
-        maybe_collection.as_ref(),
-    ))
+        timeline.as_ref(),
+        episodes.as_ref(),
+    );
+
+    Ok(AnalysisBundle {
+        snapshot_inputs,
+        timeline,
+        episodes,
+        graph,
+    })
+}
+
+fn load_snapshot_inputs_for_target(dir: &Path, target: &str) -> Result<Vec<LoadedSnapshotInput>> {
+    let paths = atlas_snapshot::list_snapshots_for_target(dir, target)?;
+    let mut loaded = Vec::new();
+
+    for path in paths {
+        let snapshot = atlas_snapshot::load_snapshot(&path)?;
+        loaded.push(LoadedSnapshotInput { path, snapshot });
+    }
+
+    loaded.sort_by_key(|a| a.snapshot.timestamp);
+    Ok(loaded)
 }
 
 fn require_latest_graph(store: &AtlasStore, target: &str) -> Result<atlas_graph::ExposureGraph> {

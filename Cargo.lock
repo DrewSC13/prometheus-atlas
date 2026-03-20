@@ -110,6 +110,7 @@ dependencies = [
  "atlas-output",
  "atlas-plugins",
  "atlas-query",
+ "atlas-report",
  "atlas-snapshot",
  "atlas-store",
  "chrono",
@@ -256,6 +257,7 @@ dependencies = [
  "atlas-core",
  "atlas-graph",
  "atlas-query",
+ "atlas-report",
  "serde",
  "serde_json",
 ]
@@ -274,6 +276,22 @@ version = "0.13.1"
 dependencies = [
  "anyhow",
  "atlas-graph",
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "atlas-report"
+version = "0.13.1"
+dependencies = [
+ "anyhow",
+ "atlas-core",
+ "atlas-correlation",
+ "atlas-drift",
+ "atlas-episodes",
+ "atlas-graph",
+ "atlas-snapshot",
  "chrono",
  "serde",
  "serde_json",
