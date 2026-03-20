@@ -7,6 +7,7 @@ use atlas_query::{
 use atlas_report::build_executive_report;
 use atlas_store::{AtlasStore, ExportFormat};
 use clap::{Parser, Subcommand};
+use serde::Serialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -30,6 +31,14 @@ enum Commands {
     Init {
         #[arg(long, default_value = "atlas.toml")]
         output: PathBuf,
+    },
+
+    Profiles {
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 
     Scan {
@@ -186,7 +195,13 @@ enum Commands {
         expression: String,
     },
 
-    QueryList,
+    QueryList {
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 
     QueryRun {
         name: String,
@@ -202,8 +217,48 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    QueryRunAll {
+        target: String,
+
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
     QueryDelete {
         name: String,
+    },
+
+    BaselineApprove {
+        resource: String,
+    },
+
+    BaselineRevoke {
+        resource: String,
+    },
+
+    BaselineList {
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    PolicyCheck {
+        #[arg(long)]
+        policy: PathBuf,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
     },
 
     Report {
@@ -299,6 +354,44 @@ struct AnalysisBundle {
     graph: atlas_graph::ExposureGraph,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct SavedQueryExecutionSummary {
+    name: String,
+    expression: String,
+    total_matches: usize,
+    returned_matches: usize,
+    top_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SavedQueryBatchSummary {
+    target: String,
+    total_queries: usize,
+    matched_queries: usize,
+    results: Vec<SavedQueryExecutionSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PolicyCheckSummary {
+    path: String,
+    valid: bool,
+    details: Vec<String>,
+    allowlisted_resources: usize,
+    allowlisted_categories: usize,
+    critical_resources: usize,
+    critical_patterns: usize,
+    environment_overrides: usize,
+    temporary_exceptions: usize,
+    baseline_resources: usize,
+    baseline_categories: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BaselineListSummary {
+    total: usize,
+    resources: Vec<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -338,6 +431,41 @@ async fn main() -> Result<()> {
                 None,
                 started.elapsed().as_millis(),
                 json!({"config_path": output.display().to_string()}),
+            )?;
+        }
+
+        Commands::Profiles {
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+
+            if want_json {
+                atlas_output::write_json_output(&config.profiles, output.as_deref())?;
+            } else {
+                println!("Profiles disponibles:");
+                for profile in &config.profiles {
+                    let ports = profile
+                        .ports
+                        .iter()
+                        .map(|p| p.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!(
+                        "- {} | ports=[{}] | timeout_ms={}",
+                        profile.name, ports, profile.timeout_ms
+                    );
+                }
+            }
+
+            let store = AtlasStore::open(Path::new(&config.storage.path)).ok();
+            record_telemetry_if_enabled(
+                &config,
+                store.as_ref(),
+                "profiles",
+                None,
+                started.elapsed().as_millis(),
+                json!({"profiles": config.profiles.len()}),
             )?;
         }
 
@@ -751,13 +879,18 @@ async fn main() -> Result<()> {
             )?;
         }
 
-        Commands::QueryList => {
+        Commands::QueryList {
+            json: want_json,
+            output,
+        } => {
             let started = Instant::now();
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
             let queries = store.list_saved_queries()?;
 
-            if queries.is_empty() {
+            if want_json {
+                atlas_output::write_json_output(&queries, output.as_deref())?;
+            } else if queries.is_empty() {
                 println!("No hay queries guardadas.");
             } else {
                 println!("Queries guardadas:");
@@ -815,6 +948,92 @@ async fn main() -> Result<()> {
             )?;
         }
 
+        Commands::QueryRunAll {
+            target,
+            limit,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let saved_queries = store.list_saved_queries()?;
+            if saved_queries.is_empty() {
+                if want_json {
+                    let empty = SavedQueryBatchSummary {
+                        target: target.clone(),
+                        total_queries: 0,
+                        matched_queries: 0,
+                        results: Vec::new(),
+                    };
+                    atlas_output::write_json_output(&empty, output.as_deref())?;
+                } else {
+                    println!("No hay queries guardadas.");
+                }
+
+                record_telemetry_if_enabled(
+                    &config,
+                    Some(&store),
+                    "query-run-all",
+                    Some(&target),
+                    started.elapsed().as_millis(),
+                    json!({
+                        "total_queries": 0,
+                        "matched_queries": 0
+                    }),
+                )?;
+            } else {
+                let graph = require_latest_graph(&store, &target)?;
+                let mut results = Vec::new();
+
+                for saved in saved_queries {
+                    let query = parse_query(&saved.expression, limit)?;
+                    let result = execute_query(&graph, &query)?;
+
+                    results.push(SavedQueryExecutionSummary {
+                        name: saved.name,
+                        expression: saved.expression,
+                        total_matches: result.summary.total_matches,
+                        returned_matches: result.summary.returned_matches,
+                        top_labels: result
+                            .matched_nodes
+                            .iter()
+                            .take(5)
+                            .map(|node| node.label.clone())
+                            .collect(),
+                    });
+                }
+
+                let matched_queries = results.iter().filter(|item| item.total_matches > 0).count();
+
+                let summary = SavedQueryBatchSummary {
+                    target: target.clone(),
+                    total_queries: results.len(),
+                    matched_queries,
+                    results,
+                };
+
+                if want_json {
+                    atlas_output::write_json_output(&summary, output.as_deref())?;
+                } else {
+                    print_human_saved_query_batch(&summary);
+                }
+
+                record_telemetry_if_enabled(
+                    &config,
+                    Some(&store),
+                    "query-run-all",
+                    Some(&target),
+                    started.elapsed().as_millis(),
+                    json!({
+                        "total_queries": summary.total_queries,
+                        "matched_queries": summary.matched_queries
+                    }),
+                )?;
+            }
+        }
+
         Commands::QueryDelete { name } => {
             let started = Instant::now();
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
@@ -836,6 +1055,118 @@ async fn main() -> Result<()> {
                 started.elapsed().as_millis(),
                 json!({
                     "name": name
+                }),
+            )?;
+        }
+
+        Commands::BaselineApprove { resource } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            store.baseline_approve(&resource)?;
+            println!("Resource aprobado para baseline: {}", resource);
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "baseline-approve",
+                Some(&resource),
+                started.elapsed().as_millis(),
+                json!({"resource": resource}),
+            )?;
+        }
+
+        Commands::BaselineRevoke { resource } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            store.baseline_revoke(&resource)?;
+            println!("Resource removido de baseline: {}", resource);
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "baseline-revoke",
+                Some(&resource),
+                started.elapsed().as_millis(),
+                json!({"resource": resource}),
+            )?;
+        }
+
+        Commands::BaselineList {
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let resources = store.baseline_list()?;
+
+            let summary = BaselineListSummary {
+                total: resources.len(),
+                resources,
+            };
+
+            if want_json {
+                atlas_output::write_json_output(&summary, output.as_deref())?;
+            } else if summary.resources.is_empty() {
+                println!("No hay recursos aprobados en baseline.");
+            } else {
+                println!("Baseline aprobado:");
+                for resource in &summary.resources {
+                    println!("- {}", resource);
+                }
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "baseline-list",
+                None,
+                started.elapsed().as_millis(),
+                json!({"total": summary.total}),
+            )?;
+        }
+
+        Commands::PolicyCheck {
+            policy,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let loaded = atlas_drift::DriftPolicy::load_from_path(&policy)?;
+            loaded.validate()?;
+
+            let summary = PolicyCheckSummary {
+                path: policy.display().to_string(),
+                valid: true,
+                details: loaded.describe(),
+                allowlisted_resources: loaded.allowlisted_resources.len(),
+                allowlisted_categories: loaded.allowlisted_categories.len(),
+                critical_resources: loaded.critical_resources.len(),
+                critical_patterns: loaded.critical_patterns.len(),
+                environment_overrides: loaded.environment_overrides.len(),
+                temporary_exceptions: loaded.temporary_exceptions.len(),
+                baseline_resources: loaded.baseline_resources.len(),
+                baseline_categories: loaded.baseline_categories.len(),
+            };
+
+            if want_json {
+                atlas_output::write_json_output(&summary, output.as_deref())?;
+            } else {
+                print_human_policy_check(&summary);
+            }
+
+            let store = AtlasStore::open(Path::new(&config.storage.path)).ok();
+            record_telemetry_if_enabled(
+                &config,
+                store.as_ref(),
+                "policy-check",
+                None,
+                started.elapsed().as_millis(),
+                json!({
+                    "path": summary.path,
+                    "valid": summary.valid
                 }),
             )?;
         }
@@ -1458,6 +1789,65 @@ fn print_human_episode_collection(collection: &atlas_episodes::EpisodeCollection
 
         for line in &episode.explanation {
             println!("      explicación: {}", line);
+        }
+    }
+}
+
+fn print_human_saved_query_batch(summary: &SavedQueryBatchSummary) {
+    println!("Target: {}", summary.target);
+    println!("Queries evaluadas: {}", summary.total_queries);
+    println!("Queries con matches: {}", summary.matched_queries);
+
+    if summary.results.is_empty() {
+        println!();
+        println!("No hay queries guardadas.");
+        return;
+    }
+
+    println!();
+    println!("Resultados por query:");
+    for item in &summary.results {
+        println!(
+            "- {} | matches={} | returned={}",
+            item.name, item.total_matches, item.returned_matches
+        );
+        println!("    expression={}", item.expression);
+
+        if !item.top_labels.is_empty() {
+            println!("    top={}", item.top_labels.join(", "));
+        }
+    }
+}
+
+fn print_human_policy_check(summary: &PolicyCheckSummary) {
+    println!("Policy: {}", summary.path);
+    println!("Válida: {}", if summary.valid { "sí" } else { "no" });
+
+    println!();
+    println!("Resumen:");
+    println!(
+        "  - allowlisted_resources: {}",
+        summary.allowlisted_resources
+    );
+    println!(
+        "  - allowlisted_categories: {}",
+        summary.allowlisted_categories
+    );
+    println!("  - critical_resources: {}", summary.critical_resources);
+    println!("  - critical_patterns: {}", summary.critical_patterns);
+    println!(
+        "  - environment_overrides: {}",
+        summary.environment_overrides
+    );
+    println!("  - temporary_exceptions: {}", summary.temporary_exceptions);
+    println!("  - baseline_resources: {}", summary.baseline_resources);
+    println!("  - baseline_categories: {}", summary.baseline_categories);
+
+    if !summary.details.is_empty() {
+        println!();
+        println!("Detalles:");
+        for line in &summary.details {
+            println!("  - {}", line);
         }
     }
 }
