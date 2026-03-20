@@ -181,6 +181,31 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    QuerySave {
+        name: String,
+        expression: String,
+    },
+
+    QueryList,
+
+    QueryRun {
+        name: String,
+        target: String,
+
+        #[arg(long, default_value_t = 25)]
+        limit: usize,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    QueryDelete {
+        name: String,
+    },
+
     Report {
         target: String,
 
@@ -697,6 +722,120 @@ async fn main() -> Result<()> {
                 json!({
                     "expression": expression,
                     "matches": result.summary.total_matches
+                }),
+            )?;
+        }
+
+        Commands::QuerySave { name, expression } => {
+            let started = Instant::now();
+
+            parse_query(&expression, 25)
+                .with_context(|| format!("query inválida para guardar: {}", expression))?;
+
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            store.save_saved_query(&name, &expression)?;
+
+            println!("Query guardada: {}", name);
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "query-save",
+                None,
+                started.elapsed().as_millis(),
+                json!({
+                    "name": name,
+                    "expression": expression
+                }),
+            )?;
+        }
+
+        Commands::QueryList => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let queries = store.list_saved_queries()?;
+
+            if queries.is_empty() {
+                println!("No hay queries guardadas.");
+            } else {
+                println!("Queries guardadas:");
+                for item in queries {
+                    println!("- {} | {}", item.name, item.expression);
+                }
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "query-list",
+                None,
+                started.elapsed().as_millis(),
+                json!({}),
+            )?;
+        }
+
+        Commands::QueryRun {
+            name,
+            target,
+            limit,
+            json: want_json,
+            output,
+        } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let saved = store
+                .load_saved_query(&name)?
+                .ok_or_else(|| anyhow::anyhow!("query guardada no encontrada: {name}"))?;
+
+            let graph = require_latest_graph(&store, &target)?;
+            let query = parse_query(&saved.expression, limit)?;
+            let result = execute_query(&graph, &query)?;
+
+            if want_json {
+                atlas_output::write_json_output(&result, output.as_deref())?;
+            } else {
+                println!("Saved query: {}", saved.name);
+                atlas_output::print_human_query_result(&result);
+            }
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "query-run",
+                Some(&target),
+                started.elapsed().as_millis(),
+                json!({
+                    "name": saved.name,
+                    "matches": result.summary.total_matches
+                }),
+            )?;
+        }
+
+        Commands::QueryDelete { name } => {
+            let started = Instant::now();
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+
+            let existing = store.load_saved_query(&name)?;
+            if existing.is_none() {
+                bail!("query guardada no encontrada: {name}");
+            }
+
+            store.delete_saved_query(&name)?;
+            println!("Query eliminada: {}", name);
+
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "query-delete",
+                None,
+                started.elapsed().as_millis(),
+                json!({
+                    "name": name
                 }),
             )?;
         }
