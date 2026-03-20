@@ -1,0 +1,23 @@
+[package]
+name = "atlas-risk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+atlas-drift = { path = "../atlas-drift" }
+atlas-episodes = { path = "../atlas-episodes" }
+atlas-graph = { path = "../atlas-graph" }
+atlas-report = { path = "../atlas-report" }
+atlas-snapshot = { path = "../atlas-snapshot" }
+
+[dev-dependencies]
+atlas-core = { path = "../atlas-core" }
+atlas-correlation = { path = "../atlas-correlation" }

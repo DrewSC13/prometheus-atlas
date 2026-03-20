@@ -34,6 +34,7 @@ atlas-output = { path = "../../crates/atlas-output" }
 atlas-plugins = { path = "../../crates/atlas-plugins" }
 atlas-query = { path = "../../crates/atlas-query" }
 atlas-report = { path = "../../crates/atlas-report" }
+atlas-risk = { path = "../../crates/atlas-risk" }
 atlas-scheduler = { path = "../../crates/atlas-scheduler" }
 atlas-snapshot = { path = "../../crates/atlas-snapshot" }
 atlas-store = { path = "../../crates/atlas-store" }

@@ -1,3 +1,5 @@
+mod v22;
+
 use anyhow::{anyhow, bail, Context, Result};
 use atlas_config::AppConfig;
 use atlas_jobs::AtlasJob;
@@ -357,6 +359,69 @@ enum Commands {
         output: Option<PathBuf>,
     },
 
+    Risk {
+        target: String,
+
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    Summary {
+        target: String,
+
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
+    Watch {
+        target: String,
+
+        #[arg(long, default_value = ".snapshots")]
+        dir: PathBuf,
+
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        #[arg(long, default_value_t = 60)]
+        interval: u64,
+
+        #[arg(long)]
+        persist: bool,
+
+        #[arg(long)]
+        alerts: bool,
+
+        #[arg(long)]
+        alert_output: Option<PathBuf>,
+
+        #[arg(long)]
+        iterations: Option<usize>,
+
+        #[arg(long)]
+        json: bool,
+
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
+
     Rebuild {
         target: String,
 
@@ -567,7 +632,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Init { output } => {
-            let started = Instant::now();
+            let _started = Instant::now();
 
             if output.exists() {
                 warn!(
@@ -582,15 +647,6 @@ async fn main() -> Result<()> {
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
             println!("Storage inicializado en: {}", config.storage.path);
-
-            record_telemetry_if_enabled(
-                &config,
-                Some(&store),
-                "init",
-                None,
-                started.elapsed().as_millis(),
-                json!({"config_path": output.display().to_string()}),
-            )?;
         }
 
         Commands::Profiles {
@@ -1732,6 +1788,54 @@ async fn main() -> Result<()> {
             )?;
         }
 
+        Commands::Risk {
+            target,
+            dir,
+            policy,
+            json: want_json,
+            output,
+        } => {
+            v22::handle_risk(&config, target, dir, policy, want_json, output)?;
+        }
+
+        Commands::Summary {
+            target,
+            dir,
+            policy,
+            json: want_json,
+            output,
+        } => {
+            v22::handle_summary(&config, target, dir, policy, want_json, output)?;
+        }
+
+        Commands::Watch {
+            target,
+            dir,
+            policy,
+            interval,
+            persist,
+            alerts,
+            alert_output,
+            iterations,
+            json: want_json,
+            output,
+        } => {
+            v22::handle_watch(
+                &config,
+                target,
+                dir,
+                policy,
+                interval,
+                persist,
+                alerts,
+                alert_output,
+                iterations,
+                want_json,
+                output,
+            )
+            .await?;
+        }
+
         Commands::Rebuild {
             target,
             dir,
@@ -2122,7 +2226,9 @@ fn load_snapshot_inputs_for_target(dir: &Path, target: &str) -> Result<Vec<Loade
 
 fn require_latest_graph(store: &AtlasStore, target: &str) -> Result<atlas_graph::ExposureGraph> {
     store.load_latest_graph(target)?.ok_or_else(|| {
-        anyhow!("no existe un grafo persistido para {target}; ejecuta primero `atlas graph {target} --persist`")
+        anyhow!(
+            "no existe un grafo persistido para {target}; ejecuta primero `atlas graph {target} --persist`"
+        )
     })
 }
 
