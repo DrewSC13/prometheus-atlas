@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/scanner",
+    "crates/atlas-api",
     "crates/atlas-config",
     "crates/atlas-core",
     "crates/atlas-correlation",
@@ -31,6 +32,7 @@ repository = "https://github.com/DrewSC13/prometheus-atlas"
 
 [workspace.dependencies]
 anyhow = "1"
+axum = "0.7"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
