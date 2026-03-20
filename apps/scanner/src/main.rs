@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use atlas_config::AppConfig;
 use atlas_jobs::AtlasJob;
 use atlas_plugins::default_registry_for;
@@ -7,8 +7,10 @@ use atlas_query::{
 };
 use atlas_report::build_executive_report;
 use atlas_scheduler::select_due_jobs;
-use atlas_store::{AtlasStore, ExportFormat, StoredTelemetryEvent};
+use atlas_store::{AtlasStore, ExportFormat};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
+use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -16,7 +18,6 @@ use std::str::FromStr;
 use std::time::Instant;
 use tracing::{info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
-use uuid::Uuid;
 
 #[derive(Parser, Debug)]
 #[command(name = "atlas")]
@@ -275,9 +276,6 @@ enum Commands {
 
         #[arg(long)]
         policy: Option<PathBuf>,
-
-        #[arg(long)]
-        disabled: bool,
     },
 
     JobList {
@@ -296,6 +294,13 @@ enum Commands {
         job_id: String,
     },
 
+    JobRun {
+        job_id: String,
+
+        #[arg(long)]
+        persist: bool,
+    },
+
     JobDelete {
         job_id: String,
     },
@@ -307,7 +312,7 @@ enum Commands {
         #[arg(long)]
         job_id: Option<String>,
 
-        #[arg(long, default_value_t = 50)]
+        #[arg(long, default_value_t = 100)]
         limit: usize,
 
         #[arg(long)]
@@ -319,6 +324,9 @@ enum Commands {
 
     SchedulerRun {
         #[arg(long)]
+        persist: bool,
+
+        #[arg(long)]
         json: bool,
 
         #[arg(long)]
@@ -326,9 +334,6 @@ enum Commands {
     },
 
     SchedulerStatus {
-        #[arg(long, default_value_t = 50)]
-        limit: usize,
-
         #[arg(long)]
         json: bool,
 
@@ -383,6 +388,39 @@ enum Commands {
 
         #[arg(long)]
         state: Option<String>,
+    },
+
+    FindingList {
+        target: String,
+
+        #[arg(long)]
+        op_state: Option<String>,
+    },
+
+    FindingAck {
+        finding_id: String,
+    },
+
+    FindingResolve {
+        finding_id: String,
+    },
+
+    FindingAccept {
+        finding_id: String,
+    },
+
+    FindingAssign {
+        finding_id: String,
+        owner: String,
+    },
+
+    FindingNote {
+        finding_id: String,
+        note: String,
+    },
+
+    ReportFindings {
+        target: String,
     },
 
     Snapshots {
@@ -468,15 +506,12 @@ struct BaselineListSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
-struct JobHistoryItem {
-    job_id: String,
-    target: String,
-    status: String,
-    duration_ms: u128,
-    snapshot_path: Option<String>,
-    findings: Option<usize>,
-    score: Option<u32>,
+struct JobHistoryEntry {
     created_at: String,
+    command: String,
+    target: Option<String>,
+    job_id: Option<String>,
+    metadata: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -484,29 +519,36 @@ struct SchedulerStatusSummary {
     total_jobs: usize,
     enabled_jobs: usize,
     disabled_jobs: usize,
-    last_scheduler_run_at: Option<String>,
-    recent_job_runs: usize,
-    recent_successes: usize,
-    recent_failures: usize,
+    due_jobs: usize,
+    jobs: Vec<JobStatusItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct JobStatusItem {
+    job_id: String,
+    target: String,
+    profile: String,
+    interval_seconds: u64,
+    enabled: bool,
+    policy_path: Option<String>,
+    last_run_at: Option<String>,
+    due_now: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SchedulerRunSummary {
+    evaluated_jobs: usize,
+    due_jobs: usize,
+    executed_jobs: usize,
+    results: Vec<SchedulerRunItem>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct SchedulerRunItem {
     job_id: String,
     target: String,
-    status: String,
-    snapshot_path: Option<String>,
-    findings: Option<usize>,
-    score: Option<u32>,
-    duration_ms: u128,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct SchedulerRunSummary {
-    total_jobs: usize,
-    due_jobs: usize,
-    executed_jobs: usize,
-    items: Vec<SchedulerRunItem>,
+    snapshot_path: String,
+    persisted: bool,
 }
 
 #[tokio::main]
@@ -1039,7 +1081,7 @@ async fn main() -> Result<()> {
 
             let saved = store
                 .load_saved_query(&name)?
-                .ok_or_else(|| anyhow::anyhow!("query guardada no encontrada: {name}"))?;
+                .ok_or_else(|| anyhow!("query guardada no encontrada: {name}"))?;
 
             let graph = require_latest_graph(&store, &target)?;
             let query = parse_query(&saved.expression, limit)?;
@@ -1293,30 +1335,40 @@ async fn main() -> Result<()> {
             profile,
             interval,
             policy,
-            disabled,
         } => {
             let started = Instant::now();
             config.profile(&profile)?;
 
+            if interval == 0 {
+                bail!("interval debe ser > 0");
+            }
+
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
 
+            let job_id = format!(
+                "job:{}:{}",
+                target,
+                Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            );
+
             let job = AtlasJob {
-                job_id: Uuid::new_v4().to_string(),
+                job_id: job_id.clone(),
                 target: target.clone(),
                 profile: profile.clone(),
                 interval_seconds: interval,
-                enabled: !disabled,
+                enabled: true,
                 policy_path: policy.as_ref().map(|p| p.display().to_string()),
                 last_run_at: None,
-                created_at: chrono::Utc::now(),
+                created_at: Utc::now(),
             };
 
             store.insert_job(&job)?;
-            println!(
-                "Job creado: {} | target={} | profile={}",
-                job.job_id, target, profile
-            );
+
+            println!("Job creado: {}", job_id);
+            println!("  - target: {}", target);
+            println!("  - profile: {}", profile);
+            println!("  - interval_seconds: {}", interval);
 
             record_telemetry_if_enabled(
                 &config,
@@ -1325,10 +1377,9 @@ async fn main() -> Result<()> {
                 Some(&target),
                 started.elapsed().as_millis(),
                 json!({
-                    "job_id": job.job_id,
+                    "job_id": job_id,
                     "profile": profile,
-                    "interval_seconds": interval,
-                    "enabled": job.enabled
+                    "interval_seconds": interval
                 }),
             )?;
         }
@@ -1347,15 +1398,15 @@ async fn main() -> Result<()> {
             } else if jobs.is_empty() {
                 println!("No hay jobs configurados.");
             } else {
-                println!("Jobs:");
+                println!("Jobs configurados:");
                 for job in jobs {
                     println!(
-                        "- {} | target={} | profile={} | interval={} | enabled={} | last_run_at={}",
+                        "- {} | target={} | profile={} | interval={}s | enabled={} | last_run_at={}",
                         job.job_id,
                         job.target,
                         job.profile,
                         job.interval_seconds,
-                        job.enabled,
+                        if job.enabled { "yes" } else { "no" },
                         job.last_run_at
                             .map(|d| d.to_rfc3339())
                             .unwrap_or_else(|| "-".to_string())
@@ -1377,13 +1428,11 @@ async fn main() -> Result<()> {
             let started = Instant::now();
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
-            let mut jobs = store.list_jobs()?;
-            let Some(mut job) = jobs.drain(..).find(|item| item.job_id == job_id) else {
-                bail!("job no encontrado: {job_id}");
-            };
 
+            let mut job = load_job_by_id(&store, &job_id)?;
             job.enabled = true;
             store.insert_job(&job)?;
+
             println!("Job habilitado: {}", job_id);
 
             record_telemetry_if_enabled(
@@ -1400,13 +1449,11 @@ async fn main() -> Result<()> {
             let started = Instant::now();
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
-            let mut jobs = store.list_jobs()?;
-            let Some(mut job) = jobs.drain(..).find(|item| item.job_id == job_id) else {
-                bail!("job no encontrado: {job_id}");
-            };
 
+            let mut job = load_job_by_id(&store, &job_id)?;
             job.enabled = false;
             store.insert_job(&job)?;
+
             println!("Job deshabilitado: {}", job_id);
 
             record_telemetry_if_enabled(
@@ -1419,38 +1466,49 @@ async fn main() -> Result<()> {
             )?;
         }
 
-        Commands::JobDelete { job_id } => {
+        Commands::JobRun { job_id, persist } => {
             let started = Instant::now();
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
 
-            // No tocamos schema: borrado lógico simple recreando lista
-            let jobs = store.list_jobs()?;
-            let kept = jobs
-                .iter()
-                .filter(|job| job.job_id != job_id)
-                .cloned()
-                .collect::<Vec<_>>();
+            let job = load_job_by_id(&store, &job_id)?;
+            let snapshot_path = run_job_once(&config, &store, &job, persist).await?;
+            store.touch_job_run(&job.job_id)?;
 
-            if kept.len() == jobs.len() {
-                bail!("job no encontrado: {job_id}");
-            }
+            println!("Job ejecutado: {}", job.job_id);
+            println!("  - target: {}", job.target);
+            println!("  - snapshot: {}", snapshot_path.display());
 
-            // recreación rápida
-            std::fs::remove_file(store.db_path()).ok();
-            let rebuilt = AtlasStore::open(store.db_path())?;
-            rebuilt.initialize()?;
-            for job in kept {
-                rebuilt.insert_job(&job)?;
-            }
+            record_telemetry_if_enabled(
+                &config,
+                Some(&store),
+                "job-run",
+                Some(&job.target),
+                started.elapsed().as_millis(),
+                json!({
+                    "job_id": job.job_id,
+                    "snapshot_path": snapshot_path.display().to_string(),
+                    "persist": persist || config.drift.persist_by_default
+                }),
+            )?;
+        }
+
+        Commands::JobDelete { job_id } => {
+            let started = Instant::now();
+            let db_path = PathBuf::from(&config.storage.path);
+            let store = AtlasStore::open(&db_path)?;
+            store.initialize()?;
+
+            let job = load_job_by_id(&store, &job_id)?;
+            delete_job_record(&db_path, &job_id)?;
 
             println!("Job eliminado: {}", job_id);
 
             record_telemetry_if_enabled(
                 &config,
-                Some(&rebuilt),
+                Some(&store),
                 "job-delete",
-                None,
+                Some(&job.target),
                 started.elapsed().as_millis(),
                 json!({ "job_id": job_id }),
             )?;
@@ -1467,26 +1525,21 @@ async fn main() -> Result<()> {
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
 
-            let events = store.list_telemetry(limit.saturating_mul(5))?;
-            let mut items = extract_job_history(&events, target.as_deref(), job_id.as_deref());
-            items.truncate(limit);
+            let history = build_job_history(&store, limit, target.as_deref(), job_id.as_deref())?;
 
             if want_json {
-                atlas_output::write_json_output(&items, output.as_deref())?;
-            } else if items.is_empty() {
+                atlas_output::write_json_output(&history, output.as_deref())?;
+            } else if history.is_empty() {
                 println!("No hay historial de jobs.");
             } else {
                 println!("Historial de jobs:");
-                for item in items {
+                for item in &history {
                     println!(
-                        "- {} | target={} | status={} | duration_ms={} | findings={} | score={} | at={}",
-                        item.job_id,
-                        item.target,
-                        item.status,
-                        item.duration_ms,
-                        item.findings.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
-                        item.score.map(|v| v.to_string()).unwrap_or_else(|| "-".to_string()),
-                        item.created_at
+                        "- {} | command={} | target={} | job_id={}",
+                        item.created_at,
+                        item.command,
+                        item.target.clone().unwrap_or_else(|| "-".to_string()),
+                        item.job_id.clone().unwrap_or_else(|| "-".to_string())
                     );
                 }
             }
@@ -1497,11 +1550,14 @@ async fn main() -> Result<()> {
                 "job-history",
                 target.as_deref(),
                 started.elapsed().as_millis(),
-                json!({ "limit": limit }),
+                json!({
+                    "limit": limit
+                }),
             )?;
         }
 
         Commands::SchedulerRun {
+            persist,
             json: want_json,
             output,
         } => {
@@ -1510,106 +1566,56 @@ async fn main() -> Result<()> {
             store.initialize()?;
 
             let jobs = store.list_jobs()?;
-            let due_jobs = select_due_jobs(&jobs, chrono::Utc::now());
+            let due_jobs = select_due_jobs(&jobs, Utc::now());
 
-            let mut items = Vec::new();
+            let mut results = Vec::new();
+            for job in &due_jobs {
+                let snapshot_path = run_job_once(&config, &store, job, persist).await?;
+                store.touch_job_run(&job.job_id)?;
 
-            for job in due_jobs.clone() {
-                let job_started = Instant::now();
-                let run_started_at = chrono::Utc::now();
+                results.push(SchedulerRunItem {
+                    job_id: job.job_id.clone(),
+                    target: job.target.clone(),
+                    snapshot_path: snapshot_path.display().to_string(),
+                    persisted: persist || config.drift.persist_by_default,
+                });
 
-                let execution = run_scheduler_job(&config, &store, &job).await;
-                let duration_ms = job_started.elapsed().as_millis();
-                let run_finished_at = chrono::Utc::now();
-
-                match execution {
-                    Ok((snapshot_path, findings, score)) => {
-                        store.touch_job_run(&job.job_id)?;
-
-                        let metadata = json!({
-                            "job_id": job.job_id,
-                            "target": job.target,
-                            "status": "success",
-                            "snapshot_path": snapshot_path,
-                            "findings": findings,
-                            "score": score,
-                            "started_at": run_started_at.to_rfc3339(),
-                            "finished_at": run_finished_at.to_rfc3339()
-                        });
-
-                        record_telemetry_if_enabled(
-                            &config,
-                            Some(&store),
-                            "job-run",
-                            Some(&job.target),
-                            duration_ms,
-                            metadata,
-                        )?;
-
-                        items.push(SchedulerRunItem {
-                            job_id: job.job_id,
-                            target: job.target,
-                            status: "success".to_string(),
-                            snapshot_path: Some(snapshot_path),
-                            findings: Some(findings),
-                            score: Some(score),
-                            duration_ms,
-                        });
-                    }
-                    Err(err) => {
-                        let metadata = json!({
-                            "job_id": job.job_id,
-                            "target": job.target,
-                            "status": "error",
-                            "error": err.to_string(),
-                            "started_at": run_started_at.to_rfc3339(),
-                            "finished_at": run_finished_at.to_rfc3339()
-                        });
-
-                        record_telemetry_if_enabled(
-                            &config,
-                            Some(&store),
-                            "job-run",
-                            Some(&job.target),
-                            duration_ms,
-                            metadata,
-                        )?;
-
-                        items.push(SchedulerRunItem {
-                            job_id: job.job_id,
-                            target: job.target,
-                            status: "error".to_string(),
-                            snapshot_path: None,
-                            findings: None,
-                            score: None,
-                            duration_ms,
-                        });
-                    }
-                }
+                record_telemetry_if_enabled(
+                    &config,
+                    Some(&store),
+                    "job-run",
+                    Some(&job.target),
+                    0,
+                    json!({
+                        "job_id": job.job_id,
+                        "snapshot_path": snapshot_path.display().to_string(),
+                        "trigger": "scheduler"
+                    }),
+                )?;
             }
 
             let summary = SchedulerRunSummary {
-                total_jobs: jobs.len(),
+                evaluated_jobs: jobs.len(),
                 due_jobs: due_jobs.len(),
-                executed_jobs: items.len(),
-                items,
+                executed_jobs: results.len(),
+                results,
             };
 
             if want_json {
                 atlas_output::write_json_output(&summary, output.as_deref())?;
             } else {
                 println!("Scheduler run:");
-                println!("  - total_jobs: {}", summary.total_jobs);
+                println!("  - evaluated_jobs: {}", summary.evaluated_jobs);
                 println!("  - due_jobs: {}", summary.due_jobs);
                 println!("  - executed_jobs: {}", summary.executed_jobs);
 
-                if !summary.items.is_empty() {
+                if !summary.results.is_empty() {
                     println!();
-                    println!("Ejecuciones:");
-                    for item in &summary.items {
+                    println!("Resultados:");
+                    for item in &summary.results {
                         println!(
-                            "  - {} | target={} | status={} | duration_ms={}",
-                            item.job_id, item.target, item.status, item.duration_ms
+                            "- {} | target={} | snapshot={}",
+                            item.job_id, item.target, item.snapshot_path
                         );
                     }
                 }
@@ -1622,7 +1628,7 @@ async fn main() -> Result<()> {
                 None,
                 started.elapsed().as_millis(),
                 json!({
-                    "total_jobs": summary.total_jobs,
+                    "evaluated_jobs": summary.evaluated_jobs,
                     "due_jobs": summary.due_jobs,
                     "executed_jobs": summary.executed_jobs
                 }),
@@ -1630,7 +1636,6 @@ async fn main() -> Result<()> {
         }
 
         Commands::SchedulerStatus {
-            limit,
             json: want_json,
             output,
         } => {
@@ -1639,27 +1644,33 @@ async fn main() -> Result<()> {
             store.initialize()?;
 
             let jobs = store.list_jobs()?;
-            let telemetry = store.list_telemetry(limit.saturating_mul(5))?;
+            let now = Utc::now();
+            let due_jobs = select_due_jobs(&jobs, now);
 
-            let summary = build_scheduler_status(&jobs, &telemetry);
+            let summary = SchedulerStatusSummary {
+                total_jobs: jobs.len(),
+                enabled_jobs: jobs.iter().filter(|j| j.enabled).count(),
+                disabled_jobs: jobs.iter().filter(|j| !j.enabled).count(),
+                due_jobs: due_jobs.len(),
+                jobs: jobs
+                    .iter()
+                    .map(|job| JobStatusItem {
+                        job_id: job.job_id.clone(),
+                        target: job.target.clone(),
+                        profile: job.profile.clone(),
+                        interval_seconds: job.interval_seconds,
+                        enabled: job.enabled,
+                        policy_path: job.policy_path.clone(),
+                        last_run_at: job.last_run_at.map(|d| d.to_rfc3339()),
+                        due_now: due_jobs.iter().any(|item| item.job_id == job.job_id),
+                    })
+                    .collect(),
+            };
 
             if want_json {
                 atlas_output::write_json_output(&summary, output.as_deref())?;
             } else {
-                println!("Scheduler status:");
-                println!("  - total_jobs: {}", summary.total_jobs);
-                println!("  - enabled_jobs: {}", summary.enabled_jobs);
-                println!("  - disabled_jobs: {}", summary.disabled_jobs);
-                println!(
-                    "  - last_scheduler_run_at: {}",
-                    summary
-                        .last_scheduler_run_at
-                        .clone()
-                        .unwrap_or_else(|| "-".to_string())
-                );
-                println!("  - recent_job_runs: {}", summary.recent_job_runs);
-                println!("  - recent_successes: {}", summary.recent_successes);
-                println!("  - recent_failures: {}", summary.recent_failures);
+                print_human_scheduler_status(&summary);
             }
 
             record_telemetry_if_enabled(
@@ -1668,7 +1679,10 @@ async fn main() -> Result<()> {
                 "scheduler-status",
                 None,
                 started.elapsed().as_millis(),
-                json!({ "limit": limit }),
+                json!({
+                    "total_jobs": summary.total_jobs,
+                    "due_jobs": summary.due_jobs
+                }),
             )?;
         }
 
@@ -1868,6 +1882,82 @@ async fn main() -> Result<()> {
             }
         }
 
+        Commands::FindingList { target, op_state } => {
+            let db_path = PathBuf::from(&config.storage.path);
+            let items = finding_list(&db_path, &target, op_state.as_deref())?;
+
+            println!("Target: {}", target);
+            println!("Findings operativos: {}", items.len());
+
+            if items.is_empty() {
+                println!();
+                println!("No se encontraron resultados.");
+            } else {
+                println!();
+                println!("Resultados:");
+                for item in items {
+                    println!(
+                        "- [{}][{}] {} | id={} | score={}",
+                        item.severity, item.op_state, item.title, item.finding_id, item.score
+                    );
+                    println!("    category={}", item.category);
+                    println!("    resource={}", item.resource);
+                    println!("    analytic_state={}", item.analytic_state);
+                }
+            }
+        }
+
+        Commands::FindingAck { finding_id } => {
+            let db_path = PathBuf::from(&config.storage.path);
+            set_finding_op_state(&db_path, &finding_id, Some("acknowledged"), None, None)?;
+            println!("Finding actualizado: {} -> acknowledged", finding_id);
+        }
+
+        Commands::FindingResolve { finding_id } => {
+            let db_path = PathBuf::from(&config.storage.path);
+            set_finding_op_state(&db_path, &finding_id, Some("resolved"), None, None)?;
+            println!("Finding actualizado: {} -> resolved", finding_id);
+        }
+
+        Commands::FindingAccept { finding_id } => {
+            let db_path = PathBuf::from(&config.storage.path);
+            set_finding_op_state(&db_path, &finding_id, Some("accepted"), None, None)?;
+            println!("Finding actualizado: {} -> accepted", finding_id);
+        }
+
+        Commands::FindingAssign { finding_id, owner } => {
+            let db_path = PathBuf::from(&config.storage.path);
+            set_finding_op_state(&db_path, &finding_id, None, Some(&owner), None)?;
+            println!("Finding asignado: {} -> {}", finding_id, owner);
+        }
+
+        Commands::FindingNote { finding_id, note } => {
+            let db_path = PathBuf::from(&config.storage.path);
+            set_finding_op_state(&db_path, &finding_id, None, None, Some(&note))?;
+            println!("Nota agregada a {}.", finding_id);
+        }
+
+        Commands::ReportFindings { target } => {
+            let db_path = PathBuf::from(&config.storage.path);
+            let items = finding_list(&db_path, &target, None)?;
+
+            println!("Target: {}", target);
+            println!("Resumen operativo de findings:");
+
+            let open = items.iter().filter(|i| i.op_state == "open").count();
+            let ack = items
+                .iter()
+                .filter(|i| i.op_state == "acknowledged")
+                .count();
+            let accepted = items.iter().filter(|i| i.op_state == "accepted").count();
+            let resolved = items.iter().filter(|i| i.op_state == "resolved").count();
+
+            println!("  - open: {}", open);
+            println!("  - acknowledged: {}", ack);
+            println!("  - accepted: {}", accepted);
+            println!("  - resolved: {}", resolved);
+        }
+
         Commands::Snapshots { target } => {
             let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
@@ -1945,52 +2035,6 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
-}
-
-async fn run_scheduler_job(
-    config: &AppConfig,
-    store: &AtlasStore,
-    job: &AtlasJob,
-) -> Result<(String, usize, u32)> {
-    let scan = atlas_discovery::scan_target(&job.target).await?;
-    let snapshot = atlas_snapshot::Snapshot::new(scan);
-    let snapshot_path = atlas_snapshot::save_snapshot(&snapshot, Path::new(".snapshots"))?;
-    store.register_snapshot(&snapshot_path, &snapshot)?;
-
-    let snapshots = store.list_snapshots(&job.target)?;
-    if snapshots.len() < 2 {
-        return Ok((snapshot_path.display().to_string(), 0, 0));
-    }
-
-    let newer = PathBuf::from(&snapshots[0].path);
-    let older = PathBuf::from(&snapshots[1].path);
-
-    let older_snapshot = atlas_snapshot::load_snapshot(&older)?;
-    let newer_snapshot = atlas_snapshot::load_snapshot(&newer)?;
-    let diff = atlas_diff::diff_snapshots(&older_snapshot, &newer_snapshot);
-
-    let policy_loaded = match &job.policy_path {
-        Some(path) => Some(atlas_drift::DriftPolicy::load_from_path(Path::new(path))?),
-        None => None,
-    };
-
-    let mut drift = atlas_drift::analyze_diff_with_policy(&diff, policy_loaded.as_ref());
-    let registry = default_registry_for(&config.plugins.enabled);
-    registry.apply_drift_report(&mut drift);
-
-    store.register_drift_report(
-        &diff.target,
-        &older,
-        &newer,
-        job.policy_path.as_deref().map(Path::new),
-        &drift,
-    )?;
-
-    Ok((
-        snapshot_path.display().to_string(),
-        drift.findings.len(),
-        drift.summary.total_score,
-    ))
 }
 
 fn build_graph_from_snapshots_and_context(
@@ -2078,9 +2122,7 @@ fn load_snapshot_inputs_for_target(dir: &Path, target: &str) -> Result<Vec<Loade
 
 fn require_latest_graph(store: &AtlasStore, target: &str) -> Result<atlas_graph::ExposureGraph> {
     store.load_latest_graph(target)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "no existe un grafo persistido para {target}; ejecuta primero `atlas graph {target} --persist`"
-        )
+        anyhow!("no existe un grafo persistido para {target}; ejecuta primero `atlas graph {target} --persist`")
     })
 }
 
@@ -2137,115 +2179,273 @@ fn record_telemetry_if_enabled(
     Ok(())
 }
 
-fn extract_job_history(
-    events: &[StoredTelemetryEvent],
+fn load_job_by_id(store: &AtlasStore, job_id: &str) -> Result<AtlasJob> {
+    store
+        .list_jobs()?
+        .into_iter()
+        .find(|job| job.job_id == job_id)
+        .ok_or_else(|| anyhow!("job no encontrado: {job_id}"))
+}
+
+async fn run_job_once(
+    config: &AppConfig,
+    store: &AtlasStore,
+    job: &AtlasJob,
+    persist_flag: bool,
+) -> Result<PathBuf> {
+    config.profile(&job.profile)?;
+
+    let result = atlas_discovery::scan_target(&job.target).await?;
+    let snapshot = atlas_snapshot::Snapshot::new(result);
+    let dir = PathBuf::from(".snapshots");
+    let snapshot_path = atlas_snapshot::save_snapshot(&snapshot, &dir)?;
+
+    let should_persist = persist_flag || config.drift.persist_by_default;
+    if should_persist {
+        store.register_snapshot(&snapshot_path, &snapshot)?;
+    }
+
+    if should_persist {
+        let bundle = build_analysis_bundle(
+            config,
+            &job.target,
+            &dir,
+            job.policy_path.as_deref().map(Path::new),
+        )?;
+
+        if let Some(timeline) = &bundle.timeline {
+            for (pair, transition) in bundle
+                .snapshot_inputs
+                .windows(2)
+                .zip(timeline.transitions.iter())
+            {
+                let older = &pair[0];
+                let newer = &pair[1];
+                store.register_drift_report(
+                    &job.target,
+                    &older.path,
+                    &newer.path,
+                    job.policy_path.as_deref().map(Path::new),
+                    &transition.report,
+                )?;
+            }
+        }
+
+        if let Some(collection) = &bundle.episodes {
+            store.store_episodes(&job.target, &collection.episodes)?;
+        }
+
+        store.store_graph(&job.target, &bundle.graph)?;
+    }
+
+    Ok(snapshot_path)
+}
+
+fn delete_job_record(db_path: &Path, job_id: &str) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    conn.execute("DELETE FROM jobs WHERE job_id = ?1", params![job_id])?;
+    Ok(())
+}
+
+fn build_job_history(
+    store: &AtlasStore,
+    limit: usize,
     target_filter: Option<&str>,
     job_id_filter: Option<&str>,
-) -> Vec<JobHistoryItem> {
-    let mut out = Vec::new();
+) -> Result<Vec<JobHistoryEntry>> {
+    let events = store.list_telemetry(limit)?;
+    let mut items = Vec::new();
 
     for event in events {
-        if event.name != "job-run" {
+        if !matches!(
+            event.name.as_str(),
+            "job-create"
+                | "job-enable"
+                | "job-disable"
+                | "job-delete"
+                | "job-run"
+                | "scheduler-run"
+                | "scheduler-status"
+        ) {
             continue;
         }
 
-        let Ok(metadata) = serde_json::from_str::<Value>(&event.metadata_json) else {
-            continue;
-        };
+        let metadata =
+            serde_json::from_str::<Value>(&event.metadata_json).unwrap_or_else(|_| json!({}));
 
-        let job_id = metadata
+        let metadata_job_id = metadata
             .get("job_id")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let target = metadata
-            .get("target")
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| event.target.as_deref().unwrap_or(""))
-            .to_string();
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         if let Some(filter) = target_filter {
-            if target != filter {
+            if event.target.as_deref() != Some(filter) {
                 continue;
             }
         }
 
         if let Some(filter) = job_id_filter {
-            if job_id != filter {
+            if metadata_job_id.as_deref() != Some(filter) {
                 continue;
             }
         }
 
-        let status = metadata
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-
-        let snapshot_path = metadata
-            .get("snapshot_path")
-            .and_then(Value::as_str)
-            .map(ToString::to_string);
-
-        let findings = metadata
-            .get("findings")
-            .and_then(Value::as_u64)
-            .map(|v| v as usize);
-
-        let score = metadata
-            .get("score")
-            .and_then(Value::as_u64)
-            .map(|v| v as u32);
-
-        out.push(JobHistoryItem {
-            job_id,
-            target,
-            status,
-            duration_ms: event.duration_ms,
-            snapshot_path,
-            findings,
-            score,
-            created_at: event.created_at.clone(),
+        items.push(JobHistoryEntry {
+            created_at: event.created_at,
+            command: event.name,
+            target: event.target,
+            job_id: metadata_job_id,
+            metadata,
         });
     }
 
-    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    out
+    Ok(items)
 }
 
-fn build_scheduler_status(
-    jobs: &[AtlasJob],
-    telemetry: &[StoredTelemetryEvent],
-) -> SchedulerStatusSummary {
-    let total_jobs = jobs.len();
-    let enabled_jobs = jobs.iter().filter(|job| job.enabled).count();
-    let disabled_jobs = total_jobs.saturating_sub(enabled_jobs);
+#[derive(Debug, Clone)]
+struct FindingOperationalItem {
+    finding_id: String,
+    severity: String,
+    title: String,
+    category: String,
+    resource: String,
+    score: u32,
+    analytic_state: String,
+    op_state: String,
+}
 
-    let last_scheduler_run_at = telemetry
-        .iter()
-        .find(|event| event.name == "scheduler-run")
-        .map(|event| event.created_at.clone());
+fn ensure_operational_findings_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS finding_ops (
+            finding_id TEXT PRIMARY KEY,
+            op_state TEXT NOT NULL DEFAULT 'open',
+            owner TEXT,
+            note TEXT,
+            updated_at TEXT NOT NULL
+        );
+        "#,
+    )?;
+    Ok(())
+}
 
-    let job_history = extract_job_history(telemetry, None, None);
-    let recent_job_runs = job_history.len();
-    let recent_successes = job_history
-        .iter()
-        .filter(|item| item.status.eq_ignore_ascii_case("success"))
-        .count();
-    let recent_failures = job_history
-        .iter()
-        .filter(|item| item.status.eq_ignore_ascii_case("error"))
-        .count();
+fn finding_exists(conn: &Connection, finding_id: &str) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT COUNT(*) FROM findings WHERE finding_id = ?1")?;
+    let count: i64 = stmt.query_row([finding_id], |row| row.get(0))?;
+    Ok(count > 0)
+}
 
-    SchedulerStatusSummary {
-        total_jobs,
-        enabled_jobs,
-        disabled_jobs,
-        last_scheduler_run_at,
-        recent_job_runs,
-        recent_successes,
-        recent_failures,
+fn set_finding_op_state(
+    db_path: &Path,
+    finding_id: &str,
+    op_state: Option<&str>,
+    owner: Option<&str>,
+    note: Option<&str>,
+) -> Result<()> {
+    let conn = Connection::open(db_path)?;
+    ensure_operational_findings_schema(&conn)?;
+
+    if !finding_exists(&conn, finding_id)? {
+        bail!("finding no encontrado: {finding_id}");
     }
+
+    let current = conn.query_row(
+        "SELECT op_state, owner, note FROM finding_ops WHERE finding_id = ?1",
+        [finding_id],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
+    );
+
+    let (current_state, current_owner, current_note) = match current {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => (None, None, None),
+        Err(err) => return Err(err.into()),
+    };
+
+    let final_state = op_state
+        .map(|s| s.to_string())
+        .or(current_state)
+        .unwrap_or_else(|| "open".to_string());
+
+    let final_owner = owner.map(|s| s.to_string()).or(current_owner);
+    let final_note = note.map(|s| s.to_string()).or(current_note);
+
+    conn.execute(
+        r#"
+        INSERT INTO finding_ops (finding_id, op_state, owner, note, updated_at)
+        VALUES (?1, ?2, ?3, ?4, ?5)
+        ON CONFLICT(finding_id) DO UPDATE SET
+            op_state = excluded.op_state,
+            owner = excluded.owner,
+            note = excluded.note,
+            updated_at = excluded.updated_at
+        "#,
+        params![
+            finding_id,
+            final_state,
+            final_owner,
+            final_note,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+
+    Ok(())
+}
+
+fn finding_list(
+    db_path: &Path,
+    target: &str,
+    op_state_filter: Option<&str>,
+) -> Result<Vec<FindingOperationalItem>> {
+    let conn = Connection::open(db_path)?;
+    ensure_operational_findings_schema(&conn)?;
+
+    let mut stmt = conn.prepare(
+        r#"
+        SELECT
+            f.finding_id,
+            f.severity,
+            f.title,
+            f.category,
+            f.resource,
+            f.score,
+            f.state,
+            COALESCE(o.op_state, 'open') AS op_state
+        FROM findings f
+        LEFT JOIN finding_ops o ON o.finding_id = f.finding_id
+        WHERE f.target = ?1
+        ORDER BY f.score DESC, f.created_at DESC
+        "#,
+    )?;
+
+    let rows = stmt.query_map([target], |row| {
+        Ok(FindingOperationalItem {
+            finding_id: row.get(0)?,
+            severity: row.get(1)?,
+            title: row.get(2)?,
+            category: row.get(3)?,
+            resource: row.get(4)?,
+            score: row.get::<_, i64>(5)? as u32,
+            analytic_state: row.get(6)?,
+            op_state: row.get(7)?,
+        })
+    })?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row?);
+    }
+
+    if let Some(filter) = op_state_filter {
+        items.retain(|i| i.op_state.eq_ignore_ascii_case(filter));
+    }
+
+    Ok(items)
 }
 
 fn print_human_diff_report(report: &atlas_diff::DiffReport) {
@@ -2508,6 +2708,41 @@ fn print_human_policy_check(summary: &PolicyCheckSummary) {
         println!("Detalles:");
         for line in &summary.details {
             println!("  - {}", line);
+        }
+    }
+}
+
+fn print_human_scheduler_status(summary: &SchedulerStatusSummary) {
+    println!("Scheduler status:");
+    println!("  - total_jobs: {}", summary.total_jobs);
+    println!("  - enabled_jobs: {}", summary.enabled_jobs);
+    println!("  - disabled_jobs: {}", summary.disabled_jobs);
+    println!("  - due_jobs: {}", summary.due_jobs);
+
+    if summary.jobs.is_empty() {
+        println!();
+        println!("No hay jobs configurados.");
+        return;
+    }
+
+    println!();
+    println!("Jobs:");
+    for item in &summary.jobs {
+        println!(
+            "- {} | target={} | profile={} | interval={}s | enabled={} | due_now={}",
+            item.job_id,
+            item.target,
+            item.profile,
+            item.interval_seconds,
+            if item.enabled { "yes" } else { "no" },
+            if item.due_now { "yes" } else { "no" }
+        );
+        println!(
+            "    last_run_at={}",
+            item.last_run_at.clone().unwrap_or_else(|| "-".to_string())
+        );
+        if let Some(policy_path) = &item.policy_path {
+            println!("    policy={}", policy_path);
         }
     }
 }

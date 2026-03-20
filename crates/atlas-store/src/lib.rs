@@ -9,6 +9,7 @@ use rusqlite::{params, types::ValueRef, Connection, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -124,6 +125,39 @@ pub struct StoredSavedQuery {
     pub expression: String,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredFindingOperationalState {
+    pub finding_id: String,
+    pub operational_state: String,
+    pub owner: Option<String>,
+    pub notes: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredCurrentFinding {
+    pub finding_id: String,
+    pub run_id: String,
+    pub target: String,
+    pub severity: String,
+    pub state: String,
+    pub category: String,
+    pub title: String,
+    pub resource: String,
+    pub asset_type: String,
+    pub environment: String,
+    pub criticality: String,
+    pub score: u32,
+    pub tags_json: String,
+    pub description: String,
+    pub is_suppressed: bool,
+    pub created_at: String,
+    pub operational_state: String,
+    pub owner: Option<String>,
+    pub notes: Option<String>,
+    pub operational_updated_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +317,14 @@ impl AtlasStore {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS finding_state (
+                finding_id TEXT PRIMARY KEY,
+                operational_state TEXT NOT NULL,
+                owner TEXT,
+                notes TEXT,
+                updated_at TEXT NOT NULL
+            );
             "#,
         )?;
 
@@ -382,68 +424,6 @@ impl AtlasStore {
         for finding in &report.suppressed_findings {
             self.insert_finding(&run_id, target, finding, true)?;
         }
-
-        Ok(())
-    }
-
-    pub fn load_job(&self, job_id: &str) -> Result<Option<AtlasJob>> {
-        let result = self.conn.query_row(
-            r#"
-            SELECT
-                job_id,
-                target,
-                profile,
-                interval_seconds,
-                enabled,
-                policy_path,
-                last_run_at,
-                created_at
-            FROM jobs
-            WHERE job_id = ?1
-            "#,
-            [job_id],
-            |row| {
-                Ok(AtlasJob {
-                    job_id: row_string(row, 0)?,
-                    target: row_string(row, 1)?,
-                    profile: row_string(row, 2)?,
-                    interval_seconds: row_u64(row, 3)? as u64,
-                    enabled: row_bool(row, 4)?,
-                    policy_path: row_optional_string(row, 5)?,
-                    last_run_at: parse_optional_datetime(row_optional_string(row, 6)?),
-                    created_at: parse_datetime(row_string(row, 7)?)?,
-                })
-            },
-        );
-
-        match result {
-            Ok(job) => Ok(Some(job)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(err) => Err(err.into()),
-        }
-    }
-
-    pub fn set_job_enabled(&self, job_id: &str, enabled: bool) -> Result<()> {
-        self.conn.execute(
-            r#"
-            UPDATE jobs
-            SET enabled = ?1
-            WHERE job_id = ?2
-            "#,
-            params![if enabled { 1 } else { 0 }, job_id],
-        )?;
-
-        Ok(())
-    }
-
-    pub fn delete_job(&self, job_id: &str) -> Result<()> {
-        self.conn.execute(
-            r#"
-            DELETE FROM jobs
-            WHERE job_id = ?1
-            "#,
-            [job_id],
-        )?;
 
         Ok(())
     }
@@ -605,6 +585,253 @@ impl AtlasStore {
         }
 
         Ok(findings)
+    }
+
+    pub fn finding_exists(&self, finding_id: &str) -> Result<bool> {
+        let found = self.conn.query_row(
+            r#"
+            SELECT 1
+            FROM findings
+            WHERE finding_id = ?1
+            LIMIT 1
+            "#,
+            [finding_id],
+            |_row| Ok(true),
+        );
+
+        match found {
+            Ok(value) => Ok(value),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn get_finding_operational_state(
+        &self,
+        finding_id: &str,
+    ) -> Result<Option<StoredFindingOperationalState>> {
+        let result = self.conn.query_row(
+            r#"
+            SELECT
+                finding_id,
+                operational_state,
+                owner,
+                notes,
+                updated_at
+            FROM finding_state
+            WHERE finding_id = ?1
+            "#,
+            [finding_id],
+            |row| {
+                Ok(StoredFindingOperationalState {
+                    finding_id: row_string(row, 0)?,
+                    operational_state: row_string(row, 1)?,
+                    owner: row_optional_string(row, 2)?,
+                    notes: row_optional_string(row, 3)?,
+                    updated_at: row_string(row, 4)?,
+                })
+            },
+        );
+
+        match result {
+            Ok(item) => Ok(Some(item)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    pub fn set_finding_operational_state(
+        &self,
+        finding_id: &str,
+        operational_state: &str,
+    ) -> Result<()> {
+        self.ensure_finding_for_triage(finding_id)?;
+        let current = self.get_finding_operational_state(finding_id)?;
+        let owner = current.as_ref().and_then(|c| c.owner.clone());
+        let notes = current.as_ref().and_then(|c| c.notes.clone());
+
+        self.conn.execute(
+            r#"
+            INSERT INTO finding_state (
+                finding_id,
+                operational_state,
+                owner,
+                notes,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(finding_id) DO UPDATE SET
+                operational_state = excluded.operational_state,
+                owner = excluded.owner,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                finding_id,
+                operational_state,
+                owner,
+                notes,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn assign_finding_owner(&self, finding_id: &str, owner: &str) -> Result<()> {
+        self.ensure_finding_for_triage(finding_id)?;
+        let current = self.get_finding_operational_state(finding_id)?;
+        let operational_state = current
+            .as_ref()
+            .map(|c| c.operational_state.clone())
+            .unwrap_or_else(|| "open".to_string());
+        let notes = current.as_ref().and_then(|c| c.notes.clone());
+
+        self.conn.execute(
+            r#"
+            INSERT INTO finding_state (
+                finding_id,
+                operational_state,
+                owner,
+                notes,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(finding_id) DO UPDATE SET
+                operational_state = excluded.operational_state,
+                owner = excluded.owner,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                finding_id,
+                operational_state,
+                owner,
+                notes,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn set_finding_note(&self, finding_id: &str, notes: &str) -> Result<()> {
+        self.ensure_finding_for_triage(finding_id)?;
+        let current = self.get_finding_operational_state(finding_id)?;
+        let operational_state = current
+            .as_ref()
+            .map(|c| c.operational_state.clone())
+            .unwrap_or_else(|| "open".to_string());
+        let owner = current.as_ref().and_then(|c| c.owner.clone());
+
+        self.conn.execute(
+            r#"
+            INSERT INTO finding_state (
+                finding_id,
+                operational_state,
+                owner,
+                notes,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(finding_id) DO UPDATE SET
+                operational_state = excluded.operational_state,
+                owner = excluded.owner,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                finding_id,
+                operational_state,
+                owner,
+                notes,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn list_current_findings_operational(
+        &self,
+        target: &str,
+        severity: Option<&str>,
+        state: Option<&str>,
+        operational_state: Option<&str>,
+        owner: Option<&str>,
+    ) -> Result<Vec<StoredCurrentFinding>> {
+        let findings = self.list_findings(target, severity, state)?;
+        let mut latest_by_finding: BTreeMap<String, StoredFinding> = BTreeMap::new();
+
+        for finding in findings {
+            latest_by_finding
+                .entry(finding.finding_id.clone())
+                .or_insert(finding);
+        }
+
+        let mut items = Vec::new();
+
+        for (_, finding) in latest_by_finding {
+            let triage = self.get_finding_operational_state(&finding.finding_id)?;
+            let op_state = triage
+                .as_ref()
+                .map(|t| t.operational_state.clone())
+                .unwrap_or_else(|| "open".to_string());
+            let op_owner = triage.as_ref().and_then(|t| t.owner.clone());
+            let op_notes = triage.as_ref().and_then(|t| t.notes.clone());
+            let op_updated_at = triage.as_ref().map(|t| t.updated_at.clone());
+
+            let item = StoredCurrentFinding {
+                finding_id: finding.finding_id,
+                run_id: finding.run_id,
+                target: finding.target,
+                severity: finding.severity,
+                state: finding.state,
+                category: finding.category,
+                title: finding.title,
+                resource: finding.resource,
+                asset_type: finding.asset_type,
+                environment: finding.environment,
+                criticality: finding.criticality,
+                score: finding.score,
+                tags_json: finding.tags_json,
+                description: finding.description,
+                is_suppressed: finding.is_suppressed,
+                created_at: finding.created_at,
+                operational_state: op_state,
+                owner: op_owner,
+                notes: op_notes,
+                operational_updated_at: op_updated_at,
+            };
+
+            items.push(item);
+        }
+
+        if let Some(filter) = operational_state {
+            items.retain(|f| f.operational_state.eq_ignore_ascii_case(filter));
+        }
+
+        if let Some(filter) = owner {
+            items.retain(|f| {
+                f.owner
+                    .as_deref()
+                    .map(|owner_value| owner_value.eq_ignore_ascii_case(filter))
+                    .unwrap_or(false)
+            });
+        }
+
+        items.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| a.operational_state.cmp(&b.operational_state))
+                .then_with(|| a.finding_id.cmp(&b.finding_id))
+        });
+
+        Ok(items)
+    }
+
+    fn ensure_finding_for_triage(&self, finding_id: &str) -> Result<()> {
+        if !self.finding_exists(finding_id)? {
+            return Err(anyhow!("finding no encontrado: {finding_id}"));
+        }
+        Ok(())
     }
 
     pub fn list_snapshots(&self, target: &str) -> Result<Vec<StoredSnapshot>> {
@@ -2139,29 +2366,68 @@ mod tests {
     }
 
     #[test]
-    fn stores_and_updates_job() {
+    fn sets_and_reads_finding_operational_state() {
         let db_path = std::env::temp_dir().join(format!(
-            "atlas-store-job-test-{}.db",
+            "atlas-store-finding-state-test-{}.db",
             Utc::now().timestamp_nanos_opt().unwrap_or(0)
         ));
 
         let store = AtlasStore::open(&db_path).unwrap();
         store.initialize().unwrap();
 
-        let job = AtlasJob::new("example.com", "standard", 3600, None, true);
-        let job_id = job.job_id.clone();
+        store
+            .conn
+            .execute(
+                r#"
+            INSERT INTO findings (
+                finding_id,
+                run_id,
+                target,
+                severity,
+                state,
+                category,
+                title,
+                resource,
+                asset_type,
+                environment,
+                criticality,
+                score,
+                tags_json,
+                description,
+                is_suppressed,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            "#,
+                params![
+                    "f1",
+                    "r1",
+                    "example.com",
+                    "HIGH",
+                    "New",
+                    "new_admin_subdomain",
+                    "Nuevo subdominio administrativo",
+                    "admin.example.com",
+                    "Subdomain",
+                    "Admin",
+                    "CRITICAL",
+                    95u32,
+                    "[]",
+                    "desc",
+                    0,
+                    Utc::now().to_rfc3339(),
+                ],
+            )
+            .unwrap();
 
-        store.insert_job(&job).unwrap();
+        store
+            .set_finding_operational_state("f1", "acknowledged")
+            .unwrap();
+        store.assign_finding_owner("f1", "claudio").unwrap();
+        store.set_finding_note("f1", "en revisión").unwrap();
 
-        let loaded = store.load_job(&job_id).unwrap().unwrap();
-        assert_eq!(loaded.target, "example.com");
-        assert!(loaded.enabled);
-
-        store.set_job_enabled(&job_id, false).unwrap();
-        let updated = store.load_job(&job_id).unwrap().unwrap();
-        assert!(!updated.enabled);
-
-        store.delete_job(&job_id).unwrap();
-        assert!(store.load_job(&job_id).unwrap().is_none());
+        let state = store.get_finding_operational_state("f1").unwrap().unwrap();
+        assert_eq!(state.operational_state, "acknowledged");
+        assert_eq!(state.owner.as_deref(), Some("claudio"));
+        assert_eq!(state.notes.as_deref(), Some("en revisión"));
     }
 }

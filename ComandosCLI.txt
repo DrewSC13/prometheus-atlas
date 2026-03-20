@@ -52,5 +52,16 @@ cargo run -p atlas -- job-delete <job_id>
 cargo run -p atlas -- job-history
 cargo run -p atlas -- job-history --target example.com
 cargo run -p atlas -- job-history --job-id <JOB_ID>
+
 cargo run -p atlas -- scheduler-status
 cargo run -p atlas -- scheduler-status --json --output scheduler_status.json
+
+cargo run -p atlas -- finding-list example.com
+cargo run -p atlas -- finding-list example.com --op-state open
+cargo run -p atlas -- finding-ack 3af898c74641e919b166da1e
+cargo run -p atlas -- finding-resolve 3af898c74641e919b166da1e
+cargo run -p atlas -- finding-accept 3af898c74641e919b166da1e
+cargo run -p atlas -- finding-assign 3af898c74641e919b166da1e claudio
+cargo run -p atlas -- finding-note 3af898c74641e919b166da1e "validado en revisión interna"
+
+cargo run -p atlas -- report-findings example.com
