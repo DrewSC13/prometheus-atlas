@@ -1,42 +1,38 @@
-# Código de conducta
+# Code of Conduct — Prometheus Atlas
 
-Prometheus Atlas sigue principios de respeto, colaboración y aprendizaje.
+## Our Commitment
 
-## Nuestro compromiso
+We are committed to creating an open, respectful and inclusive community.
 
-Queremos que la comunidad sea:
+Prometheus Atlas aims to be a collaborative space where contributors can learn, share and build together.
 
-- respetuosa
-- inclusiva
-- colaborativa
+## Expected Behavior
 
-## Conducta esperada
+Participants are expected to:
 
-Los participantes deben:
+- be respectful and professional
+- accept constructive feedback
+- collaborate positively
+- focus on improving the project
 
-- tratar a otros con respeto
-- aceptar críticas constructivas
-- colaborar de forma positiva
+## Unacceptable Behavior
 
-## Conducta inaceptable
+The following behaviors are not tolerated:
 
-No se tolera:
+- harassment or intimidation
+- discrimination of any kind
+- personal attacks
+- offensive language
+- disruptive behavior
 
-- acoso
-- insultos
-- discriminación
-- ataques personales
+## Enforcement
 
-## Cumplimiento
+Project maintainers have the right to:
 
-Los mantenedores pueden tomar medidas si estas normas no se respetan.
+- remove content
+- issue warnings
+- restrict participation
 
-Estas medidas pueden incluir:
+## Goal
 
-- advertencias
-- eliminación de contenido
-- exclusión del proyecto
-
-## Objetivo
-
-Mantener una comunidad sana y productiva alrededor del proyecto.
+Maintain a healthy and productive community around the project.

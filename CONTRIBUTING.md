@@ -1,66 +1,77 @@
-# Contribuir a Prometheus Atlas
+# Contributing to Prometheus Atlas
 
-Gracias por considerar contribuir al proyecto.
+Thank you for your interest in contributing.
 
-Prometheus Atlas es un proyecto abierto orientado a construir una plataforma de Security Drift Intelligence.
+Prometheus Atlas is an open project focused on building a **Security Drift Intelligence platform**.
 
-## Cómo contribuir
+---
 
-Puedes contribuir de varias formas:
+## Ways to contribute
 
-- reportando bugs
-- sugiriendo mejoras
-- mejorando documentación
-- enviando pull requests
+- reporting bugs
+- suggesting features
+- improving documentation
+- submitting pull requests
 
-## Flujo de trabajo
+---
 
-1. Fork del repositorio
-2. Crear una rama
+## Workflow
 
-feature/nombre-de-la-feature
+1. Fork the repository
+2. Create a branch
 
-3. Implementar cambios
-4. Ejecutar pruebas
-5. Crear pull request
+    feature/your-feature-name
 
-## Requisitos antes de enviar PR
+3. Implement changes
+4. Run checks
+5. Open a Pull Request
 
-El código debe pasar:
+---
 
-cargo fmt
+## Requirements
 
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+Before submitting a PR, ensure:
 
-cargo test --workspace
+    cargo fmt
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo test --workspace
 
-## Estilo de código
+---
 
-- Rust idiomático
-- evitar warnings
-- módulos pequeños
-- comentarios claros
+## Code Style
 
-## Tests
+- idiomatic Rust
+- no warnings
+- small modules
+- clear naming
+- minimal complexity
 
-Cada cambio importante debe incluir:
+---
 
-- test unitario
-- test de integración cuando sea necesario
+## Testing
+
+Changes should include:
+
+- unit tests
+- integration tests when needed
+
+---
 
 ## Issues
 
-Los issues deben incluir:
+Include:
 
-- descripción clara
-- pasos para reproducir
-- comportamiento esperado
-- comportamiento actual
+- clear description
+- reproduction steps
+- expected behavior
+- actual behavior
 
-## Filosofía del proyecto
+---
 
-El objetivo no es crear solo otro escáner.
+## Philosophy
 
-El objetivo es construir un motor de:
+This is not just another scanner.
 
-Security Drift Intelligence.
+This is a platform for:
+
+**Security Drift Intelligence**

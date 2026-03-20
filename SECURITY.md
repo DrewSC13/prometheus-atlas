@@ -1,42 +1,43 @@
-# Política de seguridad
+# Security Policy — Prometheus Atlas
 
-La seguridad del proyecto es importante.
+## Reporting a Vulnerability
 
-Si descubres una vulnerabilidad en Prometheus Atlas, por favor repórtala de manera responsable.
+If you discover a vulnerability:
 
-## Cómo reportar vulnerabilidades
+- do NOT open a public issue
+- report privately
 
-En lugar de abrir un issue público, envía un reporte privado.
+Include:
 
-Incluye:
+- description
+- reproduction steps
+- impact
+- affected version
 
-- descripción de la vulnerabilidad
-- pasos para reproducir
-- impacto potencial
-- versión afectada
+---
 
-## Proceso de respuesta
+## Response Process
 
-El proceso típico será:
+1. Acknowledgement
+2. Investigation
+3. Fix development
+4. Patch release
 
-1. Confirmación del reporte
-2. Análisis del problema
-3. Desarrollo de parche
-4. Publicación de fix
+---
 
-## Alcance
+## Scope
 
-Las áreas relevantes incluyen:
+Relevant areas:
 
-- manejo de red
-- parsing de datos externos
-- persistencia
-- ejecución de plugins
+- network handling
+- parsing external data
+- persistence layer
+- plugins
 
-## Buenas prácticas
+---
 
-Se recomienda:
+## Best Practices
 
-- revisar dependencias
-- mantener crates actualizados
-- usar herramientas de análisis estático
+- keep dependencies updated
+- run static analysis tools
+- validate external inputs

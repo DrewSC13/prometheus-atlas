@@ -25,3 +25,13 @@ Indica si este cambio afecta aspectos de seguridad.
 - [ ] Tests agregados o actualizados
 - [ ] Commit firmado con GPG
 - [ ] Documentación actualizada
+- [ ] cargo fmt
+- [ ] cargo clippy (no warnings)
+- [ ] cargo test (all pass)
+- [ ] added tests if needed
+
+---
+
+## Notes
+
+Anything important reviewers should know.
