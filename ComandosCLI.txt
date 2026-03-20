@@ -49,3 +49,8 @@ cargo run -p atlas -- job-enable <job_id>
 cargo run -p atlas -- job-run <job_id>
 cargo run -p atlas -- job-delete <job_id>
 
+cargo run -p atlas -- job-history
+cargo run -p atlas -- job-history --target example.com
+cargo run -p atlas -- job-history --job-id <JOB_ID>
+cargo run -p atlas -- scheduler-status
+cargo run -p atlas -- scheduler-status --json --output scheduler_status.json
