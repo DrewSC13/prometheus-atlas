@@ -1,5 +1,7 @@
-use crate::auth::{scope_from_auth, AuthContext};
-use crate::AppState;
+use crate::{
+    auth::{scope_from_auth, AuthContext},
+    state::AppState,
+};
 use axum::{
     extract::{Path, State},
     Json,

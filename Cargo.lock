@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "atlas"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-config",
@@ -139,10 +139,11 @@ dependencies = [
 
 [[package]]
 name = "atlas-api"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-config",
+ "atlas-core",
  "atlas-diff",
  "atlas-discovery",
  "atlas-drift",
@@ -167,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-config"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -176,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-core"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "chrono",
  "serde",
@@ -184,7 +185,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-correlation"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-drift",
@@ -197,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-diff"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "atlas-core",
  "atlas-snapshot",
@@ -207,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-discovery"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -219,7 +220,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-dns"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -228,7 +229,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-drift"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -243,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-episodes"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-correlation",
@@ -255,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-graph"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -272,7 +273,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-http"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -284,7 +285,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-jobs"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "chrono",
  "serde",
@@ -293,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-output"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -306,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-plugins"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "atlas-drift",
  "serde",
@@ -314,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-query"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-graph",
@@ -325,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-report"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -341,7 +342,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-risk"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -358,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-scheduler"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "atlas-jobs",
  "chrono",
@@ -366,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-snapshot"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-core",
@@ -380,7 +381,7 @@ dependencies = [
 
 [[package]]
 name = "atlas-store"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "atlas-drift",

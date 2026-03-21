@@ -26,11 +26,12 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 atlas-config = { path = "../atlas-config" }
+atlas-core = { path = "../atlas-core" }
 atlas-discovery = { path = "../atlas-discovery" }
 atlas-diff = { path = "../atlas-diff" }
 atlas-drift = { path = "../atlas-drift" }
+atlas-graph = { path = "../atlas-graph" }
 atlas-jobs = { path = "../atlas-jobs" }
 atlas-query = { path = "../atlas-query" }
 atlas-snapshot = { path = "../atlas-snapshot" }
 atlas-store = { path = "../atlas-store" }
-atlas-graph = { path = "../atlas-graph" }

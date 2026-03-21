@@ -27,7 +27,13 @@ pub async fn issue_bootstrap_token(
         .map_err(|_| ApiError::forbidden("bootstrap token inválido"))?;
 
     validate_bootstrap_token(&state, bootstrap)?;
-    let token = issue_token(&state, &body.subject, &body.tenant_id, &body.project_id, &body.role)?;
+    let token = issue_token(
+        &state,
+        &body.subject,
+        &body.tenant_id,
+        &body.project_id,
+        &body.role,
+    )?;
 
     Ok(Json(ApiEnvelope {
         data: TokenResponse {
@@ -52,14 +58,17 @@ pub async fn list_audit(
     let scope = scope_from_auth(&auth);
     let limit = default_limit(&state, query.limit);
 
-    let store = state.store.lock().map_err(|_| ApiError::internal("store lock"))?;
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| ApiError::internal("store lock"))?;
     let items = store.list_audit_events_scoped(&scope, limit)?;
 
     Ok(Json(AuditResponse {
-        data: items,
+        data: items.clone(),
         pagination: PaginationMeta {
             limit,
-            returned: limit.min(usize::MAX),
+            returned: items.len(),
         },
     }))
 }
@@ -68,7 +77,7 @@ pub async fn list_audit(
 fn _audit_metadata(auth: &AuthContext) -> serde_json::Value {
     json!({
         "actor": auth.subject,
-        "role": format!("{:?}", auth.role),
+        "roles": auth.roles,
         "tenant_id": auth.tenant_id,
         "project_id": auth.project_id
     })

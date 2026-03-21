@@ -1,5 +1,4 @@
-use crate::auth::AuthContext;
-use crate::AppState;
+use crate::{auth::AuthContext, state::AppState};
 use axum::{
     extract::{Path, State},
     http::StatusCode,

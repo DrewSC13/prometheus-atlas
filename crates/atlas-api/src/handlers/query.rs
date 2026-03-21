@@ -15,6 +15,7 @@ pub async fn run_query(
     auth: AuthContext,
     Json(body): Json<QueryRequestBody>,
 ) -> ApiResult<Json<ApiEnvelope<atlas_query::QueryResult>>> {
+    auth.require_read()?;
     let scope = scope_from_auth(&auth);
     let limit = body
         .limit
@@ -25,12 +26,14 @@ pub async fn run_query(
         .store
         .lock()
         .map_err(|_| ApiError::internal("store lock"))?;
-    let graph = store.load_latest_graph_scoped(&scope, &body.target)?.ok_or_else(|| {
-        ApiError::not_found(format!(
-            "no existe un grafo persistido para {} en este tenant/project",
-            body.target
-        ))
-    })?;
+    let graph = store
+        .load_latest_graph_scoped(&scope, &body.target)?
+        .ok_or_else(|| {
+            ApiError::not_found(format!(
+                "no existe un grafo persistido para {} en este tenant/project",
+                body.target
+            ))
+        })?;
 
     let query = atlas_query::parse_query(&body.expression, limit)?;
     let result = atlas_query::execute_query(&graph, &query)?;
@@ -40,7 +43,7 @@ pub async fn run_query(
         &auth.subject,
         "query.run",
         "graph",
-        Some(&body.target),
+        &body.target,
         &json!({
             "expression": body.expression,
             "matches": result.summary.total_matches

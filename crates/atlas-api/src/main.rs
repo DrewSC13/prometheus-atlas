@@ -1,8 +1,7 @@
 use anyhow::Result;
-use atlas_api::{router::build_router, AppState};
+use atlas_api::{router::build_router, state::AppState};
 use atlas_config::AppConfig;
 use std::net::SocketAddr;
-use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -20,10 +19,10 @@ async fn main() -> Result<()> {
         fmt().with_env_filter(filter).init();
     }
 
-    let state = Arc::new(AppState::new(config.clone())?);
+    let state = AppState::from_config(config.clone())?;
     let app = build_router(state);
 
-    let addr: SocketAddr = "0.0.0.0:3000".parse()?;
+    let addr: SocketAddr = config.server.bind.parse()?;
     let listener = TcpListener::bind(addr).await?;
 
     tracing::info!("atlas-api escuchando en {}", addr);

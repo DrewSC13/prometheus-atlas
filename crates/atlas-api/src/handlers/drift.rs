@@ -18,9 +18,10 @@ pub async fn run_drift(
     auth.require_write()?;
     let scope = scope_from_auth(&auth);
 
-    let (older_path, newer_path) = if let (Some(older), Some(newer)) =
-        (body.older_snapshot_path.clone(), body.newer_snapshot_path.clone())
-    {
+    let (older_path, newer_path) = if let (Some(older), Some(newer)) = (
+        body.older_snapshot_path.clone(),
+        body.newer_snapshot_path.clone(),
+    ) {
         (older, newer)
     } else {
         let store = state
@@ -72,7 +73,7 @@ pub async fn run_drift(
         &auth.subject,
         "drift.run",
         "target",
-        Some(&body.target),
+        &body.target,
         &json!({
             "older_snapshot_path": older_path,
             "newer_snapshot_path": newer_path,

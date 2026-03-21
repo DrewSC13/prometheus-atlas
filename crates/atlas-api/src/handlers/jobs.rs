@@ -1,5 +1,7 @@
-use crate::auth::{scope_from_auth, AuthContext};
-use crate::AppState;
+use crate::{
+    auth::{scope_from_auth, AuthContext},
+    state::AppState,
+};
 use atlas_jobs::AtlasJob;
 use axum::{
     extract::{Path, Query, State},
@@ -83,14 +85,6 @@ pub async fn create_job(
     })))
 }
 
-pub async fn create_job_scoped(
-    State(state): State<Arc<AppState>>,
-    auth: AuthContext,
-    Json(payload): Json<CreateJobRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    create_job(State(state), auth, Json(payload)).await
-}
-
 pub async fn list_jobs(
     State(state): State<Arc<AppState>>,
     auth: AuthContext,
@@ -108,14 +102,6 @@ pub async fn list_jobs(
     let items = store.list_jobs_scoped(&scope).map_err(internal_error)?;
 
     Ok(Json(json!({ "items": items })))
-}
-
-pub async fn list_jobs_scoped(
-    State(state): State<Arc<AppState>>,
-    auth: AuthContext,
-    Query(params): Query<JobListParams>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    list_jobs(State(state), auth, Query(params)).await
 }
 
 pub async fn get_job(
@@ -144,14 +130,6 @@ pub async fn get_job(
     })))
 }
 
-pub async fn get_job_scoped(
-    State(state): State<Arc<AppState>>,
-    auth: AuthContext,
-    Path(job_id): Path<String>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    get_job(State(state), auth, Path(job_id)).await
-}
-
 pub async fn enable_job(
     State(state): State<Arc<AppState>>,
     auth: AuthContext,
@@ -160,23 +138,7 @@ pub async fn enable_job(
     set_job_enabled(state, auth, job_id, true).await
 }
 
-pub async fn enable_job_scoped(
-    State(state): State<Arc<AppState>>,
-    auth: AuthContext,
-    Path(job_id): Path<String>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    set_job_enabled(state, auth, job_id, true).await
-}
-
 pub async fn disable_job(
-    State(state): State<Arc<AppState>>,
-    auth: AuthContext,
-    Path(job_id): Path<String>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    set_job_enabled(state, auth, job_id, false).await
-}
-
-pub async fn disable_job_scoped(
     State(state): State<Arc<AppState>>,
     auth: AuthContext,
     Path(job_id): Path<String>,
@@ -274,15 +236,6 @@ pub async fn run_job(
     })))
 }
 
-pub async fn run_job_scoped(
-    State(state): State<Arc<AppState>>,
-    auth: AuthContext,
-    Path(job_id): Path<String>,
-    Json(payload): Json<RunJobRequest>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    run_job(State(state), auth, Path(job_id), Json(payload)).await
-}
-
 pub async fn delete_job(
     State(state): State<Arc<AppState>>,
     auth: AuthContext,
@@ -315,14 +268,6 @@ pub async fn delete_job(
         "ok": true,
         "job_id": job_id,
     })))
-}
-
-pub async fn delete_job_scoped(
-    State(state): State<Arc<AppState>>,
-    auth: AuthContext,
-    Path(job_id): Path<String>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    delete_job(State(state), auth, Path(job_id)).await
 }
 
 fn internal_error(err: anyhow::Error) -> (StatusCode, String) {

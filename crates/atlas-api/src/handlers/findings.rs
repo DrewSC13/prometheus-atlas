@@ -1,5 +1,7 @@
-use crate::auth::{scope_from_auth, AuthContext};
-use crate::AppState;
+use crate::{
+    auth::{scope_from_auth, AuthContext},
+    state::AppState,
+};
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -69,15 +71,6 @@ pub async fn list_findings(
     })))
 }
 
-pub async fn list_findings_scoped(
-    State(state): State<Arc<AppState>>,
-    auth: AuthContext,
-    Path(target): Path<String>,
-    Query(params): Query<FindingsParams>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    list_findings(State(state), auth, Path(target), Query(params)).await
-}
-
 pub async fn list_current_findings(
     State(state): State<Arc<AppState>>,
     auth: AuthContext,
@@ -107,15 +100,6 @@ pub async fn list_current_findings(
         "target": target,
         "items": items,
     })))
-}
-
-pub async fn list_current_findings_scoped(
-    State(state): State<Arc<AppState>>,
-    auth: AuthContext,
-    Path(target): Path<String>,
-    Query(params): Query<CurrentFindingsParams>,
-) -> Result<Json<Value>, (StatusCode, String)> {
-    list_current_findings(State(state), auth, Path(target), Query(params)).await
 }
 
 pub async fn patch_finding(

@@ -1,5 +1,4 @@
-use crate::auth::AuthContext;
-use crate::AppState;
+use crate::{auth::AuthContext, state::AppState};
 use atlas_query::{execute_query, parse_query};
 use axum::{
     extract::{Path, State},

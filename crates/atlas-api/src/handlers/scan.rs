@@ -5,7 +5,7 @@ use serde_json::json;
 
 use crate::{
     auth::{scope_from_auth, AuthContext},
-    error::ApiResult,
+    error::{ApiError, ApiResult},
     models::{ApiEnvelope, ScanRequest},
     state::AppState,
 };
@@ -22,14 +22,14 @@ pub async fn scan(
     let store = state
         .store
         .lock()
-        .map_err(|_| crate::error::ApiError::internal("store lock"))?;
+        .map_err(|_| ApiError::internal("store lock"))?;
 
     store.record_audit_event_scoped(
         &scope,
         &auth.subject,
         "scan.execute",
         "target",
-        Some(&body.target),
+        &body.target,
         &json!({
             "resolved_ips": result.resolved_ips.len(),
             "subdomains": result.subdomains.len(),

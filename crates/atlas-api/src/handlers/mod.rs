@@ -1,7 +1,12 @@
+pub mod admin;
+pub mod drift;
 pub mod findings;
 pub mod graphs;
+pub mod health;
 pub mod jobs;
 pub mod queries;
+pub mod query;
 pub mod reports;
+pub mod scan;
 pub mod snapshots;
 pub mod telemetry;
