@@ -1,4 +1,4 @@
-use atlas_jobs::AtlasJob;
+use atlas_jobs::{AtlasJob, JobDispatchRequest, JobTrigger};
 use chrono::{DateTime, Utc};
 
 pub fn select_due_jobs(jobs: &[AtlasJob], now: DateTime<Utc>) -> Vec<AtlasJob> {
@@ -16,6 +16,26 @@ pub fn select_due_jobs(jobs: &[AtlasJob], now: DateTime<Utc>) -> Vec<AtlasJob> {
     });
 
     due
+}
+
+pub fn build_dispatch_requests(
+    tenant_id: &str,
+    project_id: &str,
+    jobs: &[AtlasJob],
+    now: DateTime<Utc>,
+) -> Vec<JobDispatchRequest> {
+    select_due_jobs(jobs, now)
+        .into_iter()
+        .map(|job| {
+            JobDispatchRequest::from_job(
+                tenant_id.to_string(),
+                project_id.to_string(),
+                &job,
+                JobTrigger::Scheduled,
+            )
+            .available_at(now)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -49,5 +69,19 @@ mod tests {
 
         let selected = select_due_jobs(&[job], now);
         assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn scheduler_builds_dispatch_requests() {
+        let now = Utc::now();
+
+        let mut due = AtlasJob::new("example.com", "standard", 3600, None, true);
+        due.last_run_at = Some(now - Duration::seconds(7200));
+
+        let requests = build_dispatch_requests("tenant-a", "project-x", &[due], now);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].tenant_id, "tenant-a");
+        assert_eq!(requests[0].project_id, "project-x");
+        assert_eq!(requests[0].trigger, JobTrigger::Scheduled);
     }
 }

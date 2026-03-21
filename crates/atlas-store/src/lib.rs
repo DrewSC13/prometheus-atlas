@@ -2,10 +2,12 @@ use anyhow::{anyhow, Result};
 use atlas_drift::DriftReport;
 use atlas_episodes::RiskEpisode;
 use atlas_graph::{EdgeKind, ExposureGraph, GraphEdge, GraphNode, NodeKind};
-use atlas_jobs::AtlasJob;
+use atlas_jobs::{AtlasJob, JobDispatchRequest};
+use atlas_queue::{JobExecutionRecord, JobQueueItem, JobQueueStatus};
 use atlas_snapshot::Snapshot;
+use atlas_tenancy::{AtlasUser, Membership, Organization, Workspace, WorkspaceRole};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, types::ValueRef, Connection, Row};
+use rusqlite::{params, types::ValueRef, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -198,7 +200,6 @@ pub struct StoredCurrentFinding {
 #[derive(Debug, Clone)]
 struct TableColumn {
     name: String,
-    declared_type: String,
 }
 
 pub struct AtlasStore {
@@ -224,18 +225,56 @@ impl AtlasStore {
             r#"
             PRAGMA foreign_keys = ON;
 
+            CREATE TABLE IF NOT EXISTS organizations (
+                organization_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                slug TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspaces (
+                workspace_id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                slug TEXT NOT NULL,
+                environment TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS users (
+                user_id TEXT PRIMARY KEY,
+                subject TEXT NOT NULL UNIQUE,
+                email TEXT,
+                display_name TEXT,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS memberships (
+                membership_id TEXT PRIMARY KEY,
+                organization_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS snapshots (
-                snapshot_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
+                snapshot_id TEXT NOT NULL,
                 target TEXT NOT NULL,
                 timestamp TEXT NOT NULL,
                 snapshot_version INTEGER NOT NULL,
                 file_hash TEXT NOT NULL,
                 path TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, snapshot_id)
             );
 
             CREATE TABLE IF NOT EXISTS drift_runs (
-                run_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
+                run_id TEXT NOT NULL,
                 target TEXT NOT NULL,
                 older_snapshot_path TEXT NOT NULL,
                 newer_snapshot_path TEXT NOT NULL,
@@ -243,10 +282,13 @@ impl AtlasStore {
                 total_findings INTEGER NOT NULL,
                 total_score INTEGER NOT NULL,
                 overall_severity TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, run_id)
             );
 
             CREATE TABLE IF NOT EXISTS findings (
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
                 finding_id TEXT NOT NULL,
                 run_id TEXT NOT NULL,
                 target TEXT NOT NULL,
@@ -263,16 +305,19 @@ impl AtlasStore {
                 description TEXT NOT NULL,
                 is_suppressed INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
-                PRIMARY KEY (finding_id, run_id)
+                PRIMARY KEY (tenant_id, project_id, finding_id, run_id)
             );
 
             CREATE TABLE IF NOT EXISTS telemetry (
-                telemetry_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
+                telemetry_id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 target TEXT,
                 duration_ms TEXT NOT NULL,
                 metadata_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, telemetry_id)
             );
 
             CREATE TABLE IF NOT EXISTS audit_events (
@@ -288,23 +333,31 @@ impl AtlasStore {
             );
 
             CREATE TABLE IF NOT EXISTS jobs (
-                job_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
+                job_id TEXT NOT NULL,
                 target TEXT NOT NULL,
                 profile TEXT NOT NULL,
                 interval_seconds INTEGER NOT NULL,
                 enabled INTEGER NOT NULL,
                 policy_path TEXT,
                 last_run_at TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, job_id)
             );
 
             CREATE TABLE IF NOT EXISTS baseline_entries (
-                resource TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
+                resource TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, resource)
             );
 
             CREATE TABLE IF NOT EXISTS episodes (
-                episode_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
+                episode_id TEXT NOT NULL,
                 target TEXT NOT NULL,
                 title TEXT NOT NULL,
                 kind TEXT NOT NULL,
@@ -319,20 +372,26 @@ impl AtlasStore {
                 ended_at TEXT NOT NULL,
                 summary TEXT NOT NULL,
                 explanation_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, episode_id)
             );
 
             CREATE TABLE IF NOT EXISTS graphs (
-                graph_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
+                graph_id TEXT NOT NULL,
                 target TEXT NOT NULL,
                 node_count INTEGER NOT NULL,
                 edge_count INTEGER NOT NULL,
                 generated_at TEXT NOT NULL,
                 summary_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, graph_id)
             );
 
             CREATE TABLE IF NOT EXISTS graph_nodes (
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
                 graph_id TEXT NOT NULL,
                 node_id TEXT NOT NULL,
                 target TEXT NOT NULL,
@@ -341,10 +400,12 @@ impl AtlasStore {
                 first_seen TEXT,
                 last_seen TEXT,
                 attributes_json TEXT NOT NULL,
-                PRIMARY KEY (graph_id, node_id)
+                PRIMARY KEY (tenant_id, project_id, graph_id, node_id)
             );
 
             CREATE TABLE IF NOT EXISTS graph_edges (
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
                 graph_id TEXT NOT NULL,
                 edge_id TEXT NOT NULL,
                 target TEXT NOT NULL,
@@ -355,32 +416,343 @@ impl AtlasStore {
                 first_seen TEXT,
                 last_seen TEXT,
                 attributes_json TEXT NOT NULL,
-                PRIMARY KEY (graph_id, edge_id)
+                PRIMARY KEY (tenant_id, project_id, graph_id, edge_id)
             );
 
             CREATE TABLE IF NOT EXISTS saved_queries (
-                name TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
+                name TEXT NOT NULL,
                 expression TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, name)
             );
 
             CREATE TABLE IF NOT EXISTS finding_state (
-                finding_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT 'default',
+                project_id TEXT NOT NULL DEFAULT 'default',
+                finding_id TEXT NOT NULL,
                 operational_state TEXT NOT NULL,
                 owner TEXT,
                 notes TEXT,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, finding_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS job_queue (
+                queue_id TEXT PRIMARY KEY,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                target TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                policy_path TEXT,
+                trigger TEXT NOT NULL,
+                requested_by TEXT,
+                persist_artifacts INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                attempts INTEGER NOT NULL,
+                max_attempts INTEGER NOT NULL,
+                available_at TEXT NOT NULL,
+                claimed_by TEXT,
+                claimed_at TEXT,
+                lease_expires_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_error TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS job_executions (
+                execution_id TEXT PRIMARY KEY,
+                queue_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                worker_id TEXT,
+                status TEXT NOT NULL,
+                started_at TEXT,
+                finished_at TEXT,
+                result_json TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL
             );
             "#,
         )?;
 
         self.repair_legacy_tables_if_needed()?;
+        self.bootstrap_default_tenancy()?;
+        self.create_indexes()?;
+        Ok(())
+    }
+
+    fn create_indexes(&self) -> Result<()> {
+        self.conn.execute_batch(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_jobs_scope_created_at
+            ON jobs (tenant_id, project_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_findings_scope_target
+            ON findings (tenant_id, project_id, target, score DESC, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_snapshots_scope_target
+            ON snapshots (tenant_id, project_id, target, timestamp DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_job_queue_scope_status
+            ON job_queue (tenant_id, project_id, status, available_at ASC, created_at ASC);
+
+            CREATE INDEX IF NOT EXISTS idx_job_queue_job
+            ON job_queue (tenant_id, project_id, job_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_saved_queries_scope
+            ON saved_queries (tenant_id, project_id, name ASC);
+
+            CREATE INDEX IF NOT EXISTS idx_finding_state_scope
+            ON finding_state (tenant_id, project_id, finding_id);
+
+            CREATE INDEX IF NOT EXISTS idx_audit_scope
+            ON audit_events (tenant_id, project_id, created_at DESC);
+            "#,
+        )?;
         Ok(())
     }
 
     pub fn db_path(&self) -> &Path {
         &self.db_path
+    }
+
+    fn bootstrap_default_tenancy(&self) -> Result<()> {
+        let org = Organization {
+            organization_id: "default".to_string(),
+            name: "Default".to_string(),
+            slug: "default".to_string(),
+            created_at: Utc::now(),
+        };
+        self.upsert_organization(&org)?;
+
+        let workspace = Workspace {
+            workspace_id: "default".to_string(),
+            organization_id: "default".to_string(),
+            name: "Default".to_string(),
+            slug: "default".to_string(),
+            environment: "default".to_string(),
+            created_at: Utc::now(),
+        };
+        self.upsert_workspace(&workspace)?;
+
+        Ok(())
+    }
+
+    pub fn upsert_organization(&self, org: &Organization) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO organizations (
+                organization_id,
+                name,
+                slug,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(organization_id) DO UPDATE SET
+                name = excluded.name,
+                slug = excluded.slug
+            "#,
+            params![
+                org.organization_id,
+                org.name,
+                org.slug,
+                org.created_at.to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_organizations(&self) -> Result<Vec<Organization>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT organization_id, name, slug, created_at
+            FROM organizations
+            ORDER BY created_at ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(Organization {
+                organization_id: row_string(row, 0)?,
+                name: row_string(row, 1)?,
+                slug: row_string(row, 2)?,
+                created_at: parse_datetime(row_string(row, 3)?)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    pub fn upsert_workspace(&self, workspace: &Workspace) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO workspaces (
+                workspace_id,
+                organization_id,
+                name,
+                slug,
+                environment,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(workspace_id) DO UPDATE SET
+                organization_id = excluded.organization_id,
+                name = excluded.name,
+                slug = excluded.slug,
+                environment = excluded.environment
+            "#,
+            params![
+                workspace.workspace_id,
+                workspace.organization_id,
+                workspace.name,
+                workspace.slug,
+                workspace.environment,
+                workspace.created_at.to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_workspaces_by_org(&self, organization_id: &str) -> Result<Vec<Workspace>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT workspace_id, organization_id, name, slug, environment, created_at
+            FROM workspaces
+            WHERE organization_id = ?1
+            ORDER BY created_at ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([organization_id], |row| {
+            Ok(Workspace {
+                workspace_id: row_string(row, 0)?,
+                organization_id: row_string(row, 1)?,
+                name: row_string(row, 2)?,
+                slug: row_string(row, 3)?,
+                environment: row_string(row, 4)?,
+                created_at: parse_datetime(row_string(row, 5)?)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    pub fn upsert_user(&self, user: &AtlasUser) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO users (
+                user_id,
+                subject,
+                email,
+                display_name,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5)
+            ON CONFLICT(subject) DO UPDATE SET
+                email = excluded.email,
+                display_name = excluded.display_name
+            "#,
+            params![
+                user.user_id,
+                user.subject,
+                user.email,
+                user.display_name,
+                user.created_at.to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_users(&self) -> Result<Vec<AtlasUser>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT user_id, subject, email, display_name, created_at
+            FROM users
+            ORDER BY created_at ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            Ok(AtlasUser {
+                user_id: row_string(row, 0)?,
+                subject: row_string(row, 1)?,
+                email: row_optional_string(row, 2)?,
+                display_name: row_optional_string(row, 3)?,
+                created_at: parse_datetime(row_string(row, 4)?)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    pub fn upsert_membership(&self, membership: &Membership) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO memberships (
+                membership_id,
+                organization_id,
+                workspace_id,
+                user_id,
+                role,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(membership_id) DO UPDATE SET
+                role = excluded.role
+            "#,
+            params![
+                membership.membership_id,
+                membership.organization_id,
+                membership.workspace_id,
+                membership.user_id,
+                membership.role.to_string(),
+                membership.created_at.to_rfc3339()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_memberships_scoped(&self, scope: &StorageScope) -> Result<Vec<Membership>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT membership_id, organization_id, workspace_id, user_id, role, created_at
+            FROM memberships
+            WHERE organization_id = ?1 AND workspace_id = ?2
+            ORDER BY created_at ASC
+            "#,
+        )?;
+
+        let rows = stmt.query_map(params![scope.tenant_id, scope.project_id], |row| {
+            let role = WorkspaceRole::from_str(&row_string(row, 4)?)
+                .map_err(|e| to_sql_err(anyhow!(e)))?;
+            Ok(Membership {
+                membership_id: row_string(row, 0)?,
+                organization_id: row_string(row, 1)?,
+                workspace_id: row_string(row, 2)?,
+                user_id: row_string(row, 3)?,
+                role,
+                created_at: parse_datetime(row_string(row, 5)?)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
     }
 
     pub fn register_snapshot(&self, path: &Path, snapshot: &Snapshot) -> Result<()> {
@@ -389,7 +761,7 @@ impl AtlasStore {
 
     pub fn register_snapshot_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         path: &Path,
         snapshot: &Snapshot,
     ) -> Result<()> {
@@ -406,6 +778,8 @@ impl AtlasStore {
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO snapshots (
+                tenant_id,
+                project_id,
                 snapshot_id,
                 target,
                 timestamp,
@@ -413,9 +787,11 @@ impl AtlasStore {
                 file_hash,
                 path,
                 created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
             params![
+                scope.tenant_id,
+                scope.project_id,
                 snapshot_id,
                 snapshot.target,
                 snapshot.timestamp.to_rfc3339(),
@@ -449,7 +825,7 @@ impl AtlasStore {
 
     pub fn register_drift_report_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         target: &str,
         older_snapshot: &Path,
         newer_snapshot: &Path,
@@ -468,6 +844,8 @@ impl AtlasStore {
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO drift_runs (
+                tenant_id,
+                project_id,
                 run_id,
                 target,
                 older_snapshot_path,
@@ -477,9 +855,11 @@ impl AtlasStore {
                 total_score,
                 overall_severity,
                 created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             "#,
             params![
+                scope.tenant_id,
+                scope.project_id,
                 run_id,
                 target,
                 older_snapshot.display().to_string(),
@@ -493,11 +873,11 @@ impl AtlasStore {
         )?;
 
         for finding in &report.findings {
-            self.insert_finding(&run_id, target, finding, false)?;
+            self.insert_finding(scope, &run_id, target, finding, false)?;
         }
 
         for finding in &report.suppressed_findings {
-            self.insert_finding(&run_id, target, finding, true)?;
+            self.insert_finding(scope, &run_id, target, finding, true)?;
         }
 
         Ok(())
@@ -505,6 +885,7 @@ impl AtlasStore {
 
     fn insert_finding(
         &self,
+        scope: &StorageScope,
         run_id: &str,
         target: &str,
         finding: &atlas_drift::DriftFinding,
@@ -513,6 +894,8 @@ impl AtlasStore {
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO findings (
+                tenant_id,
+                project_id,
                 finding_id,
                 run_id,
                 target,
@@ -529,9 +912,11 @@ impl AtlasStore {
                 description,
                 is_suppressed,
                 created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
             "#,
             params![
+                scope.tenant_id,
+                scope.project_id,
                 finding.finding_id,
                 run_id,
                 target,
@@ -560,7 +945,7 @@ impl AtlasStore {
 
     pub fn list_history_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         target: &str,
     ) -> Result<Vec<StoredHistoryItem>> {
         let mut stmt = self.conn.prepare(
@@ -576,12 +961,12 @@ impl AtlasStore {
                 overall_severity,
                 created_at
             FROM drift_runs
-            WHERE target = ?1
+            WHERE tenant_id = ?1 AND project_id = ?2 AND target = ?3
             ORDER BY created_at DESC
             "#,
         )?;
 
-        let rows = stmt.query_map([target], |row| {
+        let rows = stmt.query_map(params![scope.tenant_id, scope.project_id, target], |row| {
             Ok(StoredHistoryItem {
                 run_id: row_string(row, 0)?,
                 target: row_string(row, 1)?,
@@ -613,7 +998,7 @@ impl AtlasStore {
 
     pub fn list_findings_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         target: &str,
         severity: Option<&str>,
         state: Option<&str>,
@@ -638,12 +1023,12 @@ impl AtlasStore {
                 is_suppressed,
                 created_at
             FROM findings
-            WHERE target = ?1
+            WHERE tenant_id = ?1 AND project_id = ?2 AND target = ?3
             ORDER BY score DESC, created_at DESC
             "#,
         )?;
 
-        let rows = stmt.query_map([target], |row| {
+        let rows = stmt.query_map(params![scope.tenant_id, scope.project_id, target], |row| {
             Ok(StoredFinding {
                 finding_id: row_string(row, 0)?,
                 run_id: row_string(row, 1)?,
@@ -680,15 +1065,15 @@ impl AtlasStore {
         Ok(findings)
     }
 
-    pub fn finding_exists(&self, finding_id: &str) -> Result<bool> {
+    pub fn finding_exists_scoped(&self, scope: &StorageScope, finding_id: &str) -> Result<bool> {
         let found = self.conn.query_row(
             r#"
             SELECT 1
             FROM findings
-            WHERE finding_id = ?1
+            WHERE tenant_id = ?1 AND project_id = ?2 AND finding_id = ?3
             LIMIT 1
             "#,
-            [finding_id],
+            params![scope.tenant_id, scope.project_id, finding_id],
             |_row| Ok(true),
         );
 
@@ -703,34 +1088,41 @@ impl AtlasStore {
         &self,
         finding_id: &str,
     ) -> Result<Option<StoredFindingOperationalState>> {
-        let result = self.conn.query_row(
-            r#"
-            SELECT
-                finding_id,
-                operational_state,
-                owner,
-                notes,
-                updated_at
-            FROM finding_state
-            WHERE finding_id = ?1
-            "#,
-            [finding_id],
-            |row| {
-                Ok(StoredFindingOperationalState {
-                    finding_id: row_string(row, 0)?,
-                    operational_state: row_string(row, 1)?,
-                    owner: row_optional_string(row, 2)?,
-                    notes: row_optional_string(row, 3)?,
-                    updated_at: row_string(row, 4)?,
-                })
-            },
-        );
+        self.get_finding_operational_state_scoped(&StorageScope::global(), finding_id)
+    }
 
-        match result {
-            Ok(item) => Ok(Some(item)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(err) => Err(err.into()),
-        }
+    pub fn get_finding_operational_state_scoped(
+        &self,
+        scope: &StorageScope,
+        finding_id: &str,
+    ) -> Result<Option<StoredFindingOperationalState>> {
+        let result = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    finding_id,
+                    operational_state,
+                    owner,
+                    notes,
+                    updated_at
+                FROM finding_state
+                WHERE tenant_id = ?1 AND project_id = ?2 AND finding_id = ?3
+                "#,
+                params![scope.tenant_id, scope.project_id, finding_id],
+                |row| {
+                    Ok(StoredFindingOperationalState {
+                        finding_id: row_string(row, 0)?,
+                        operational_state: row_string(row, 1)?,
+                        owner: row_optional_string(row, 2)?,
+                        notes: row_optional_string(row, 3)?,
+                        updated_at: row_string(row, 4)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(result)
     }
 
     pub fn set_finding_operational_state(
@@ -738,50 +1130,67 @@ impl AtlasStore {
         finding_id: &str,
         operational_state: &str,
     ) -> Result<()> {
-        self.ensure_finding_for_triage(finding_id)?;
-        let current = self.get_finding_operational_state(finding_id)?;
-        let owner = current.as_ref().and_then(|c| c.owner.clone());
-        let notes = current.as_ref().and_then(|c| c.notes.clone());
-
-        self.conn.execute(
-            r#"
-            INSERT INTO finding_state (
-                finding_id,
-                operational_state,
-                owner,
-                notes,
-                updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5)
-            ON CONFLICT(finding_id) DO UPDATE SET
-                operational_state = excluded.operational_state,
-                owner = excluded.owner,
-                notes = excluded.notes,
-                updated_at = excluded.updated_at
-            "#,
-            params![
-                finding_id,
-                operational_state,
-                owner,
-                notes,
-                Utc::now().to_rfc3339(),
-            ],
-        )?;
-
-        Ok(())
+        self.set_finding_operational_state_scoped(
+            &StorageScope::global(),
+            finding_id,
+            operational_state,
+        )
     }
 
     pub fn set_finding_operational_state_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         finding_id: &str,
         operational_state: &str,
     ) -> Result<()> {
-        self.set_finding_operational_state(finding_id, operational_state)
+        self.ensure_finding_for_triage(scope, finding_id)?;
+        let current = self.get_finding_operational_state_scoped(scope, finding_id)?;
+        let owner = current.as_ref().and_then(|c| c.owner.clone());
+        let notes = current.as_ref().and_then(|c| c.notes.clone());
+
+        self.conn.execute(
+            r#"
+            INSERT INTO finding_state (
+                tenant_id,
+                project_id,
+                finding_id,
+                operational_state,
+                owner,
+                notes,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(tenant_id, project_id, finding_id) DO UPDATE SET
+                operational_state = excluded.operational_state,
+                owner = excluded.owner,
+                notes = excluded.notes,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                scope.tenant_id,
+                scope.project_id,
+                finding_id,
+                operational_state,
+                owner,
+                notes,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(())
     }
 
     pub fn assign_finding_owner(&self, finding_id: &str, owner: &str) -> Result<()> {
-        self.ensure_finding_for_triage(finding_id)?;
-        let current = self.get_finding_operational_state(finding_id)?;
+        self.assign_finding_owner_scoped(&StorageScope::global(), finding_id, owner)
+    }
+
+    pub fn assign_finding_owner_scoped(
+        &self,
+        scope: &StorageScope,
+        finding_id: &str,
+        owner: &str,
+    ) -> Result<()> {
+        self.ensure_finding_for_triage(scope, finding_id)?;
+        let current = self.get_finding_operational_state_scoped(scope, finding_id)?;
         let operational_state = current
             .as_ref()
             .map(|c| c.operational_state.clone())
@@ -791,19 +1200,23 @@ impl AtlasStore {
         self.conn.execute(
             r#"
             INSERT INTO finding_state (
+                tenant_id,
+                project_id,
                 finding_id,
                 operational_state,
                 owner,
                 notes,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5)
-            ON CONFLICT(finding_id) DO UPDATE SET
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(tenant_id, project_id, finding_id) DO UPDATE SET
                 operational_state = excluded.operational_state,
                 owner = excluded.owner,
                 notes = excluded.notes,
                 updated_at = excluded.updated_at
             "#,
             params![
+                scope.tenant_id,
+                scope.project_id,
                 finding_id,
                 operational_state,
                 owner,
@@ -815,18 +1228,18 @@ impl AtlasStore {
         Ok(())
     }
 
-    pub fn assign_finding_owner_scoped(
-        &self,
-        _scope: &StorageScope,
-        finding_id: &str,
-        owner: &str,
-    ) -> Result<()> {
-        self.assign_finding_owner(finding_id, owner)
+    pub fn set_finding_note(&self, finding_id: &str, notes: &str) -> Result<()> {
+        self.set_finding_note_scoped(&StorageScope::global(), finding_id, notes)
     }
 
-    pub fn set_finding_note(&self, finding_id: &str, notes: &str) -> Result<()> {
-        self.ensure_finding_for_triage(finding_id)?;
-        let current = self.get_finding_operational_state(finding_id)?;
+    pub fn set_finding_note_scoped(
+        &self,
+        scope: &StorageScope,
+        finding_id: &str,
+        notes: &str,
+    ) -> Result<()> {
+        self.ensure_finding_for_triage(scope, finding_id)?;
+        let current = self.get_finding_operational_state_scoped(scope, finding_id)?;
         let operational_state = current
             .as_ref()
             .map(|c| c.operational_state.clone())
@@ -836,19 +1249,23 @@ impl AtlasStore {
         self.conn.execute(
             r#"
             INSERT INTO finding_state (
+                tenant_id,
+                project_id,
                 finding_id,
                 operational_state,
                 owner,
                 notes,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5)
-            ON CONFLICT(finding_id) DO UPDATE SET
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ON CONFLICT(tenant_id, project_id, finding_id) DO UPDATE SET
                 operational_state = excluded.operational_state,
                 owner = excluded.owner,
                 notes = excluded.notes,
                 updated_at = excluded.updated_at
             "#,
             params![
+                scope.tenant_id,
+                scope.project_id,
                 finding_id,
                 operational_state,
                 owner,
@@ -858,15 +1275,6 @@ impl AtlasStore {
         )?;
 
         Ok(())
-    }
-
-    pub fn set_finding_note_scoped(
-        &self,
-        _scope: &StorageScope,
-        finding_id: &str,
-        notes: &str,
-    ) -> Result<()> {
-        self.set_finding_note(finding_id, notes)
     }
 
     pub fn list_current_findings_operational(
@@ -889,14 +1297,14 @@ impl AtlasStore {
 
     pub fn list_current_findings_operational_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         target: &str,
         severity: Option<&str>,
         state: Option<&str>,
         operational_state: Option<&str>,
         owner: Option<&str>,
     ) -> Result<Vec<StoredCurrentFinding>> {
-        let findings = self.list_findings(target, severity, state)?;
+        let findings = self.list_findings_scoped(scope, target, severity, state)?;
         let mut latest_by_finding: BTreeMap<String, StoredFinding> = BTreeMap::new();
 
         for finding in findings {
@@ -908,7 +1316,7 @@ impl AtlasStore {
         let mut items = Vec::new();
 
         for (_, finding) in latest_by_finding {
-            let triage = self.get_finding_operational_state(&finding.finding_id)?;
+            let triage = self.get_finding_operational_state_scoped(scope, &finding.finding_id)?;
             let op_state = triage
                 .as_ref()
                 .map(|t| t.operational_state.clone())
@@ -966,8 +1374,8 @@ impl AtlasStore {
         Ok(items)
     }
 
-    fn ensure_finding_for_triage(&self, finding_id: &str) -> Result<()> {
-        if !self.finding_exists(finding_id)? {
+    fn ensure_finding_for_triage(&self, scope: &StorageScope, finding_id: &str) -> Result<()> {
+        if !self.finding_exists_scoped(scope, finding_id)? {
             return Err(anyhow!("finding no encontrado: {finding_id}"));
         }
         Ok(())
@@ -979,7 +1387,7 @@ impl AtlasStore {
 
     pub fn list_snapshots_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         target: &str,
     ) -> Result<Vec<StoredSnapshot>> {
         let mut stmt = self.conn.prepare(
@@ -993,12 +1401,12 @@ impl AtlasStore {
                 path,
                 created_at
             FROM snapshots
-            WHERE target = ?1
+            WHERE tenant_id = ?1 AND project_id = ?2 AND target = ?3
             ORDER BY timestamp DESC
             "#,
         )?;
 
-        let rows = stmt.query_map([target], |row| {
+        let rows = stmt.query_map(params![scope.tenant_id, scope.project_id, target], |row| {
             Ok(StoredSnapshot {
                 snapshot_id: row_string(row, 0)?,
                 target: row_string(row, 1)?,
@@ -1024,20 +1432,35 @@ impl AtlasStore {
         duration_ms: u128,
         metadata: &Value,
     ) -> Result<()> {
+        self.record_telemetry_scoped(&StorageScope::global(), name, target, duration_ms, metadata)
+    }
+
+    pub fn record_telemetry_scoped(
+        &self,
+        scope: &StorageScope,
+        name: &str,
+        target: Option<&str>,
+        duration_ms: u128,
+        metadata: &Value,
+    ) -> Result<()> {
         let telemetry_id = format!("{}:{}", name, Utc::now().timestamp_nanos_opt().unwrap_or(0));
 
         self.conn.execute(
             r#"
             INSERT INTO telemetry (
+                tenant_id,
+                project_id,
                 telemetry_id,
                 name,
                 target,
                 duration_ms,
                 metadata_json,
                 created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
             params![
+                scope.tenant_id,
+                scope.project_id,
                 telemetry_id,
                 name,
                 target,
@@ -1056,7 +1479,7 @@ impl AtlasStore {
 
     pub fn list_telemetry_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         limit: usize,
     ) -> Result<Vec<StoredTelemetryEvent>> {
         let mut stmt = self.conn.prepare(
@@ -1069,24 +1492,28 @@ impl AtlasStore {
                 metadata_json,
                 created_at
             FROM telemetry
+            WHERE tenant_id = ?1 AND project_id = ?2
             ORDER BY created_at DESC
-            LIMIT ?1
+            LIMIT ?3
             "#,
         )?;
 
-        let rows = stmt.query_map([limit as i64], |row| {
-            let duration_raw = row_string(row, 3)?;
-            let duration_ms = duration_raw.parse::<u128>().unwrap_or(0);
+        let rows = stmt.query_map(
+            params![scope.tenant_id, scope.project_id, limit as i64],
+            |row| {
+                let duration_raw = row_string(row, 3)?;
+                let duration_ms = duration_raw.parse::<u128>().unwrap_or(0);
 
-            Ok(StoredTelemetryEvent {
-                telemetry_id: row_string(row, 0)?,
-                name: row_string(row, 1)?,
-                target: row_optional_string(row, 2)?,
-                duration_ms,
-                metadata_json: row_string(row, 4)?,
-                created_at: row_string(row, 5)?,
-            })
-        })?;
+                Ok(StoredTelemetryEvent {
+                    telemetry_id: row_string(row, 0)?,
+                    name: row_string(row, 1)?,
+                    target: row_optional_string(row, 2)?,
+                    duration_ms,
+                    metadata_json: row_string(row, 4)?,
+                    created_at: row_string(row, 5)?,
+                })
+            },
+        )?;
 
         let mut events = Vec::new();
         for row in rows {
@@ -1123,7 +1550,8 @@ impl AtlasStore {
         details: &Value,
     ) -> Result<()> {
         let audit_id = format!(
-            "{}:{}:{}",
+            "{}:{}:{}:{}",
+            scope.tenant_id,
             action,
             resource_id,
             Utc::now().timestamp_nanos_opt().unwrap_or(0)
@@ -1272,7 +1700,7 @@ impl AtlasStore {
         self.list_jobs_scoped(&StorageScope::global())
     }
 
-    pub fn list_jobs_scoped(&self, _scope: &StorageScope) -> Result<Vec<AtlasJob>> {
+    pub fn list_jobs_scoped(&self, scope: &StorageScope) -> Result<Vec<AtlasJob>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -1285,11 +1713,12 @@ impl AtlasStore {
                 last_run_at,
                 created_at
             FROM jobs
+            WHERE tenant_id = ?1 AND project_id = ?2
             ORDER BY created_at DESC
             "#,
         )?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![scope.tenant_id, scope.project_id], |row| {
             let enabled_value = row_bool(row, 4)?;
             let policy_path = row_optional_string(row, 5)?;
             let last_run_at = row_optional_string(row, 6)?;
@@ -1318,10 +1747,12 @@ impl AtlasStore {
         self.insert_job_scoped(&StorageScope::global(), job)
     }
 
-    pub fn insert_job_scoped(&self, _scope: &StorageScope, job: &AtlasJob) -> Result<()> {
+    pub fn insert_job_scoped(&self, scope: &StorageScope, job: &AtlasJob) -> Result<()> {
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO jobs (
+                tenant_id,
+                project_id,
                 job_id,
                 target,
                 profile,
@@ -1330,9 +1761,11 @@ impl AtlasStore {
                 policy_path,
                 last_run_at,
                 created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             "#,
             params![
+                scope.tenant_id,
+                scope.project_id,
                 job.job_id,
                 job.target,
                 job.profile,
@@ -1351,64 +1784,282 @@ impl AtlasStore {
         self.touch_job_run_scoped(&StorageScope::global(), job_id)
     }
 
-    pub fn touch_job_run_scoped(&self, _scope: &StorageScope, job_id: &str) -> Result<()> {
+    pub fn touch_job_run_scoped(&self, scope: &StorageScope, job_id: &str) -> Result<()> {
         self.conn.execute(
             r#"
             UPDATE jobs
             SET last_run_at = ?1
-            WHERE job_id = ?2
+            WHERE tenant_id = ?2 AND project_id = ?3 AND job_id = ?4
             "#,
-            params![Utc::now().to_rfc3339(), job_id],
+            params![
+                Utc::now().to_rfc3339(),
+                scope.tenant_id,
+                scope.project_id,
+                job_id
+            ],
         )?;
 
         Ok(())
     }
 
-    pub fn delete_job_scoped(&self, _scope: &StorageScope, job_id: &str) -> Result<()> {
+    pub fn delete_job_scoped(&self, scope: &StorageScope, job_id: &str) -> Result<()> {
         self.conn.execute(
             r#"
             DELETE FROM jobs
-            WHERE job_id = ?1
+            WHERE tenant_id = ?1 AND project_id = ?2 AND job_id = ?3
             "#,
-            params![job_id],
+            params![scope.tenant_id, scope.project_id, job_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn enqueue_job_dispatch_scoped(
+        &self,
+        scope: &StorageScope,
+        dispatch: &JobDispatchRequest,
+    ) -> Result<JobQueueItem> {
+        let mut scoped_dispatch = dispatch.clone();
+        scoped_dispatch.tenant_id = scope.tenant_id.clone();
+        scoped_dispatch.project_id = scope.project_id.clone();
+
+        let item = JobQueueItem::from_dispatch(scoped_dispatch);
+
+        self.conn.execute(
+            r#"
+            INSERT INTO job_queue (
+                queue_id,
+                tenant_id,
+                project_id,
+                job_id,
+                target,
+                profile,
+                policy_path,
+                trigger,
+                requested_by,
+                persist_artifacts,
+                status,
+                attempts,
+                max_attempts,
+                available_at,
+                claimed_by,
+                claimed_at,
+                lease_expires_at,
+                created_at,
+                updated_at,
+                last_error
+            ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
+                ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20
+            )
+            "#,
+            params![
+                item.queue_id,
+                item.tenant_id,
+                item.project_id,
+                item.job_id,
+                item.target,
+                item.profile,
+                item.policy_path,
+                item.trigger,
+                item.requested_by,
+                if item.persist_artifacts { 1 } else { 0 },
+                item.status.to_string(),
+                item.attempts,
+                item.max_attempts,
+                item.available_at.to_rfc3339(),
+                item.claimed_by,
+                item.claimed_at.map(|d| d.to_rfc3339()),
+                item.lease_expires_at.map(|d| d.to_rfc3339()),
+                item.created_at.to_rfc3339(),
+                item.updated_at.to_rfc3339(),
+                item.last_error,
+            ],
+        )?;
+
+        let execution = JobExecutionRecord::from_queue(&item);
+        self.upsert_job_execution(&execution)?;
+
+        Ok(item)
+    }
+
+    pub fn list_job_queue_scoped(
+        &self,
+        scope: &StorageScope,
+        limit: usize,
+    ) -> Result<Vec<JobQueueItem>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                queue_id,
+                tenant_id,
+                project_id,
+                job_id,
+                target,
+                profile,
+                policy_path,
+                trigger,
+                requested_by,
+                persist_artifacts,
+                status,
+                attempts,
+                max_attempts,
+                available_at,
+                claimed_by,
+                claimed_at,
+                lease_expires_at,
+                created_at,
+                updated_at,
+                last_error
+            FROM job_queue
+            WHERE tenant_id = ?1 AND project_id = ?2
+            ORDER BY created_at DESC
+            LIMIT ?3
+            "#,
+        )?;
+
+        let rows = stmt.query_map(
+            params![scope.tenant_id, scope.project_id, limit as i64],
+            map_job_queue_item,
+        )?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
+    pub fn get_job_queue_item_scoped(
+        &self,
+        scope: &StorageScope,
+        queue_id: &str,
+    ) -> Result<Option<JobQueueItem>> {
+        let item = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    queue_id,
+                    tenant_id,
+                    project_id,
+                    job_id,
+                    target,
+                    profile,
+                    policy_path,
+                    trigger,
+                    requested_by,
+                    persist_artifacts,
+                    status,
+                    attempts,
+                    max_attempts,
+                    available_at,
+                    claimed_by,
+                    claimed_at,
+                    lease_expires_at,
+                    created_at,
+                    updated_at,
+                    last_error
+                FROM job_queue
+                WHERE tenant_id = ?1 AND project_id = ?2 AND queue_id = ?3
+                "#,
+                params![scope.tenant_id, scope.project_id, queue_id],
+                map_job_queue_item,
+            )
+            .optional()?;
+
+        Ok(item)
+    }
+
+    fn upsert_job_execution(&self, execution: &JobExecutionRecord) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT OR REPLACE INTO job_executions (
+                execution_id,
+                queue_id,
+                tenant_id,
+                project_id,
+                job_id,
+                worker_id,
+                status,
+                started_at,
+                finished_at,
+                result_json,
+                error_message,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            "#,
+            params![
+                execution.execution_id,
+                execution.queue_id,
+                execution.tenant_id,
+                execution.project_id,
+                execution.job_id,
+                execution.worker_id,
+                execution.status.to_string(),
+                execution.started_at.map(|d| d.to_rfc3339()),
+                execution.finished_at.map(|d| d.to_rfc3339()),
+                execution.result_json,
+                execution.error_message,
+                execution.created_at.to_rfc3339(),
+            ],
         )?;
         Ok(())
     }
 
     pub fn baseline_approve(&self, resource: &str) -> Result<()> {
+        self.baseline_approve_scoped(&StorageScope::global(), resource)
+    }
+
+    pub fn baseline_approve_scoped(&self, scope: &StorageScope, resource: &str) -> Result<()> {
         self.conn.execute(
             r#"
-            INSERT OR REPLACE INTO baseline_entries (resource, created_at)
-            VALUES (?1, ?2)
+            INSERT OR REPLACE INTO baseline_entries (tenant_id, project_id, resource, created_at)
+            VALUES (?1, ?2, ?3, ?4)
             "#,
-            params![resource, Utc::now().to_rfc3339()],
+            params![
+                scope.tenant_id,
+                scope.project_id,
+                resource,
+                Utc::now().to_rfc3339()
+            ],
         )?;
 
         Ok(())
     }
 
     pub fn baseline_revoke(&self, resource: &str) -> Result<()> {
+        self.baseline_revoke_scoped(&StorageScope::global(), resource)
+    }
+
+    pub fn baseline_revoke_scoped(&self, scope: &StorageScope, resource: &str) -> Result<()> {
         self.conn.execute(
             r#"
             DELETE FROM baseline_entries
-            WHERE resource = ?1
+            WHERE tenant_id = ?1 AND project_id = ?2 AND resource = ?3
             "#,
-            params![resource],
+            params![scope.tenant_id, scope.project_id, resource],
         )?;
 
         Ok(())
     }
 
     pub fn baseline_list(&self) -> Result<Vec<String>> {
+        self.baseline_list_scoped(&StorageScope::global())
+    }
+
+    pub fn baseline_list_scoped(&self, scope: &StorageScope) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT resource
             FROM baseline_entries
+            WHERE tenant_id = ?1 AND project_id = ?2
             ORDER BY resource ASC
             "#,
         )?;
 
-        let rows = stmt.query_map([], |row| row_string(row, 0))?;
+        let rows = stmt.query_map(params![scope.tenant_id, scope.project_id], |row| {
+            row_string(row, 0)
+        })?;
 
         let mut resources = Vec::new();
         for row in rows {
@@ -1424,7 +2075,7 @@ impl AtlasStore {
 
     pub fn store_episodes_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         target: &str,
         episodes: &[RiskEpisode],
     ) -> Result<()> {
@@ -1434,6 +2085,8 @@ impl AtlasStore {
             self.conn.execute(
                 r#"
                 INSERT OR REPLACE INTO episodes (
+                    tenant_id,
+                    project_id,
                     episode_id,
                     target,
                     title,
@@ -1450,9 +2103,11 @@ impl AtlasStore {
                     summary,
                     explanation_json,
                     created_at
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
                 "#,
                 params![
+                    scope.tenant_id,
+                    scope.project_id,
                     episode.episode_id,
                     target,
                     episode.title,
@@ -1482,7 +2137,7 @@ impl AtlasStore {
 
     pub fn list_episodes_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         target: &str,
     ) -> Result<Vec<StoredEpisode>> {
         let mut stmt = self.conn.prepare(
@@ -1505,12 +2160,12 @@ impl AtlasStore {
                 explanation_json,
                 created_at
             FROM episodes
-            WHERE target = ?1
+            WHERE tenant_id = ?1 AND project_id = ?2 AND target = ?3
             ORDER BY score DESC, started_at DESC
             "#,
         )?;
 
-        let rows = stmt.query_map([target], |row| {
+        let rows = stmt.query_map(params![scope.tenant_id, scope.project_id, target], |row| {
             Ok(StoredEpisode {
                 episode_id: row_string(row, 0)?,
                 target: row_string(row, 1)?,
@@ -1545,7 +2200,7 @@ impl AtlasStore {
 
     pub fn store_graph_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         target: &str,
         graph: &ExposureGraph,
     ) -> Result<()> {
@@ -1567,6 +2222,8 @@ impl AtlasStore {
         self.conn.execute(
             r#"
             INSERT OR REPLACE INTO graphs (
+                tenant_id,
+                project_id,
                 graph_id,
                 target,
                 node_count,
@@ -1574,9 +2231,11 @@ impl AtlasStore {
                 generated_at,
                 summary_json,
                 created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             "#,
             params![
+                scope.tenant_id,
+                scope.project_id,
                 graph_id,
                 target,
                 graph.node_count,
@@ -1588,18 +2247,20 @@ impl AtlasStore {
         )?;
 
         self.conn.execute(
-            "DELETE FROM graph_nodes WHERE graph_id = ?1",
-            params![graph_id.clone()],
+            "DELETE FROM graph_nodes WHERE tenant_id = ?1 AND project_id = ?2 AND graph_id = ?3",
+            params![scope.tenant_id, scope.project_id, graph_id.clone()],
         )?;
         self.conn.execute(
-            "DELETE FROM graph_edges WHERE graph_id = ?1",
-            params![graph_id.clone()],
+            "DELETE FROM graph_edges WHERE tenant_id = ?1 AND project_id = ?2 AND graph_id = ?3",
+            params![scope.tenant_id, scope.project_id, graph_id.clone()],
         )?;
 
         for node in &graph.nodes {
             self.conn.execute(
                 r#"
                 INSERT INTO graph_nodes (
+                    tenant_id,
+                    project_id,
                     graph_id,
                     node_id,
                     target,
@@ -1608,9 +2269,11 @@ impl AtlasStore {
                     first_seen,
                     last_seen,
                     attributes_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                 "#,
                 params![
+                    scope.tenant_id,
+                    scope.project_id,
                     graph_id,
                     node.node_id,
                     node.target,
@@ -1627,6 +2290,8 @@ impl AtlasStore {
             self.conn.execute(
                 r#"
                 INSERT INTO graph_edges (
+                    tenant_id,
+                    project_id,
                     graph_id,
                     edge_id,
                     target,
@@ -1637,9 +2302,11 @@ impl AtlasStore {
                     first_seen,
                     last_seen,
                     attributes_json
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
                 "#,
                 params![
+                    scope.tenant_id,
+                    scope.project_id,
                     graph_id,
                     edge.edge_id,
                     edge.target,
@@ -1663,7 +2330,7 @@ impl AtlasStore {
 
     pub fn list_graphs_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         target: &str,
     ) -> Result<Vec<StoredGraphRecord>> {
         let mut stmt = self.conn.prepare(
@@ -1677,12 +2344,12 @@ impl AtlasStore {
                 summary_json,
                 created_at
             FROM graphs
-            WHERE target = ?1
+            WHERE tenant_id = ?1 AND project_id = ?2 AND target = ?3
             ORDER BY generated_at DESC
             "#,
         )?;
 
-        let rows = stmt.query_map([target], |row| {
+        let rows = stmt.query_map(params![scope.tenant_id, scope.project_id, target], |row| {
             Ok(StoredGraphRecord {
                 graph_id: row_string(row, 0)?,
                 target: row_string(row, 1)?,
@@ -1708,25 +2375,27 @@ impl AtlasStore {
 
     pub fn load_latest_graph_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         target: &str,
     ) -> Result<Option<ExposureGraph>> {
-        let graph_row = self.conn.query_row(
-            r#"
-            SELECT graph_id, generated_at
-            FROM graphs
-            WHERE target = ?1
-            ORDER BY generated_at DESC
-            LIMIT 1
-            "#,
-            [target],
-            |row| Ok((row_string(row, 0)?, row_string(row, 1)?)),
-        );
+        let graph_row = self
+            .conn
+            .query_row(
+                r#"
+                SELECT graph_id, generated_at
+                FROM graphs
+                WHERE tenant_id = ?1 AND project_id = ?2 AND target = ?3
+                ORDER BY generated_at DESC
+                LIMIT 1
+                "#,
+                params![scope.tenant_id, scope.project_id, target],
+                |row| Ok((row_string(row, 0)?, row_string(row, 1)?)),
+            )
+            .optional()?;
 
         let (graph_id, generated_at_str) = match graph_row {
-            Ok(row) => row,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-            Err(err) => return Err(err.into()),
+            Some(row) => row,
+            None => return Ok(None),
         };
 
         let mut nodes_stmt = self.conn.prepare(
@@ -1740,26 +2409,29 @@ impl AtlasStore {
                 last_seen,
                 attributes_json
             FROM graph_nodes
-            WHERE graph_id = ?1
+            WHERE tenant_id = ?1 AND project_id = ?2 AND graph_id = ?3
             ORDER BY node_id ASC
             "#,
         )?;
 
-        let node_rows = nodes_stmt.query_map([graph_id.clone()], |row| {
-            let kind_str = row_string(row, 2)?;
-            let attrs_json = row_string(row, 6)?;
-            let attrs = serde_json::from_str(&attrs_json).unwrap_or_default();
+        let node_rows = nodes_stmt.query_map(
+            params![scope.tenant_id, scope.project_id, graph_id.clone()],
+            |row| {
+                let kind_str = row_string(row, 2)?;
+                let attrs_json = row_string(row, 6)?;
+                let attrs = serde_json::from_str(&attrs_json).unwrap_or_default();
 
-            Ok(GraphNode {
-                node_id: row_string(row, 0)?,
-                target: row_string(row, 1)?,
-                kind: NodeKind::from_str(&kind_str).map_err(to_sql_err)?,
-                label: row_string(row, 3)?,
-                first_seen: parse_optional_datetime(row_optional_string(row, 4)?),
-                last_seen: parse_optional_datetime(row_optional_string(row, 5)?),
-                attributes: attrs,
-            })
-        })?;
+                Ok(GraphNode {
+                    node_id: row_string(row, 0)?,
+                    target: row_string(row, 1)?,
+                    kind: NodeKind::from_str(&kind_str).map_err(to_sql_err)?,
+                    label: row_string(row, 3)?,
+                    first_seen: parse_optional_datetime(row_optional_string(row, 4)?),
+                    last_seen: parse_optional_datetime(row_optional_string(row, 5)?),
+                    attributes: attrs,
+                })
+            },
+        )?;
 
         let mut nodes = Vec::new();
         for row in node_rows {
@@ -1779,28 +2451,31 @@ impl AtlasStore {
                 last_seen,
                 attributes_json
             FROM graph_edges
-            WHERE graph_id = ?1
+            WHERE tenant_id = ?1 AND project_id = ?2 AND graph_id = ?3
             ORDER BY edge_id ASC
             "#,
         )?;
 
-        let edge_rows = edges_stmt.query_map([graph_id], |row| {
-            let kind_str = row_string(row, 4)?;
-            let attrs_json = row_string(row, 8)?;
-            let attrs = serde_json::from_str(&attrs_json).unwrap_or_default();
+        let edge_rows = edges_stmt.query_map(
+            params![scope.tenant_id, scope.project_id, graph_id],
+            |row| {
+                let kind_str = row_string(row, 4)?;
+                let attrs_json = row_string(row, 8)?;
+                let attrs = serde_json::from_str(&attrs_json).unwrap_or_default();
 
-            Ok(GraphEdge {
-                edge_id: row_string(row, 0)?,
-                target: row_string(row, 1)?,
-                from: row_string(row, 2)?,
-                to: row_string(row, 3)?,
-                kind: EdgeKind::from_str(&kind_str).map_err(to_sql_err)?,
-                weight: row_u64(row, 5)? as u32,
-                first_seen: parse_optional_datetime(row_optional_string(row, 6)?),
-                last_seen: parse_optional_datetime(row_optional_string(row, 7)?),
-                attributes: attrs,
-            })
-        })?;
+                Ok(GraphEdge {
+                    edge_id: row_string(row, 0)?,
+                    target: row_string(row, 1)?,
+                    from: row_string(row, 2)?,
+                    to: row_string(row, 3)?,
+                    kind: EdgeKind::from_str(&kind_str).map_err(to_sql_err)?,
+                    weight: row_u64(row, 5)? as u32,
+                    first_seen: parse_optional_datetime(row_optional_string(row, 6)?),
+                    last_seen: parse_optional_datetime(row_optional_string(row, 7)?),
+                    attributes: attrs,
+                })
+            },
+        )?;
 
         let mut edges = Vec::new();
         for row in edge_rows {
@@ -1828,7 +2503,7 @@ impl AtlasStore {
 
     pub fn save_saved_query_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         name: &str,
         expression: &str,
     ) -> Result<()> {
@@ -1837,16 +2512,25 @@ impl AtlasStore {
         self.conn.execute(
             r#"
             INSERT INTO saved_queries (
+                tenant_id,
+                project_id,
                 name,
                 expression,
                 created_at,
                 updated_at
-            ) VALUES (?1, ?2, ?3, ?4)
-            ON CONFLICT(name) DO UPDATE SET
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ON CONFLICT(tenant_id, project_id, name) DO UPDATE SET
                 expression = excluded.expression,
                 updated_at = excluded.updated_at
             "#,
-            params![name, expression, now, now],
+            params![
+                scope.tenant_id,
+                scope.project_id,
+                name,
+                expression,
+                now,
+                now
+            ],
         )?;
 
         Ok(())
@@ -1856,10 +2540,7 @@ impl AtlasStore {
         self.list_saved_queries_scoped(&StorageScope::global())
     }
 
-    pub fn list_saved_queries_scoped(
-        &self,
-        _scope: &StorageScope,
-    ) -> Result<Vec<StoredSavedQuery>> {
+    pub fn list_saved_queries_scoped(&self, scope: &StorageScope) -> Result<Vec<StoredSavedQuery>> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
@@ -1868,11 +2549,12 @@ impl AtlasStore {
                 created_at,
                 updated_at
             FROM saved_queries
+            WHERE tenant_id = ?1 AND project_id = ?2
             ORDER BY name ASC
             "#,
         )?;
 
-        let rows = stmt.query_map([], |row| {
+        let rows = stmt.query_map(params![scope.tenant_id, scope.project_id], |row| {
             Ok(StoredSavedQuery {
                 name: row_string(row, 0)?,
                 expression: row_string(row, 1)?,
@@ -1895,705 +2577,179 @@ impl AtlasStore {
 
     pub fn load_saved_query_scoped(
         &self,
-        _scope: &StorageScope,
+        scope: &StorageScope,
         name: &str,
     ) -> Result<Option<StoredSavedQuery>> {
-        let result = self.conn.query_row(
-            r#"
-            SELECT
-                name,
-                expression,
-                created_at,
-                updated_at
-            FROM saved_queries
-            WHERE name = ?1
-            "#,
-            [name],
-            |row| {
-                Ok(StoredSavedQuery {
-                    name: row_string(row, 0)?,
-                    expression: row_string(row, 1)?,
-                    created_at: row_string(row, 2)?,
-                    updated_at: row_string(row, 3)?,
-                })
-            },
-        );
+        let result = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    name,
+                    expression,
+                    created_at,
+                    updated_at
+                FROM saved_queries
+                WHERE tenant_id = ?1 AND project_id = ?2 AND name = ?3
+                "#,
+                params![scope.tenant_id, scope.project_id, name],
+                |row| {
+                    Ok(StoredSavedQuery {
+                        name: row_string(row, 0)?,
+                        expression: row_string(row, 1)?,
+                        created_at: row_string(row, 2)?,
+                        updated_at: row_string(row, 3)?,
+                    })
+                },
+            )
+            .optional()?;
 
-        match result {
-            Ok(item) => Ok(Some(item)),
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(err) => Err(err.into()),
-        }
+        Ok(result)
     }
 
     pub fn delete_saved_query(&self, name: &str) -> Result<()> {
         self.delete_saved_query_scoped(&StorageScope::global(), name)
     }
 
-    pub fn delete_saved_query_scoped(&self, _scope: &StorageScope, name: &str) -> Result<()> {
+    pub fn delete_saved_query_scoped(&self, scope: &StorageScope, name: &str) -> Result<()> {
         self.conn.execute(
             r#"
             DELETE FROM saved_queries
-            WHERE name = ?1
+            WHERE tenant_id = ?1 AND project_id = ?2 AND name = ?3
             "#,
-            [name],
+            params![scope.tenant_id, scope.project_id, name],
         )?;
 
         Ok(())
     }
 
     fn repair_legacy_tables_if_needed(&self) -> Result<()> {
-        self.repair_table_if_needed(
+        for table in [
             "snapshots",
-            &[
-                ("snapshot_id", "TEXT"),
-                ("target", "TEXT"),
-                ("timestamp", "TEXT"),
-                ("snapshot_version", "INTEGER"),
-                ("file_hash", "TEXT"),
-                ("path", "TEXT"),
-                ("created_at", "TEXT"),
-            ],
-            r#"
-            CREATE TABLE snapshots (
-                snapshot_id TEXT PRIMARY KEY,
-                target TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                snapshot_version INTEGER NOT NULL,
-                file_hash TEXT NOT NULL,
-                path TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            "#,
-            Some(
-                r#"
-                INSERT OR IGNORE INTO snapshots (
-                    snapshot_id,
-                    target,
-                    timestamp,
-                    snapshot_version,
-                    file_hash,
-                    path,
-                    created_at
-                )
-                SELECT
-                    CAST(snapshot_id AS TEXT),
-                    CAST(target AS TEXT),
-                    CAST(timestamp AS TEXT),
-                    CAST(snapshot_version AS INTEGER),
-                    CAST(file_hash AS TEXT),
-                    CAST(path AS TEXT),
-                    CAST(created_at AS TEXT)
-                FROM snapshots_legacy_incompatible
-                "#,
-            ),
-        )?;
-
-        self.repair_table_if_needed(
             "drift_runs",
-            &[
-                ("run_id", "TEXT"),
-                ("target", "TEXT"),
-                ("older_snapshot_path", "TEXT"),
-                ("newer_snapshot_path", "TEXT"),
-                ("policy_path", "TEXT"),
-                ("total_findings", "INTEGER"),
-                ("total_score", "INTEGER"),
-                ("overall_severity", "TEXT"),
-                ("created_at", "TEXT"),
-            ],
-            r#"
-            CREATE TABLE drift_runs (
-                run_id TEXT PRIMARY KEY,
-                target TEXT NOT NULL,
-                older_snapshot_path TEXT NOT NULL,
-                newer_snapshot_path TEXT NOT NULL,
-                policy_path TEXT,
-                total_findings INTEGER NOT NULL,
-                total_score INTEGER NOT NULL,
-                overall_severity TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            "#,
-            Some(
-                r#"
-                INSERT OR IGNORE INTO drift_runs (
-                    run_id,
-                    target,
-                    older_snapshot_path,
-                    newer_snapshot_path,
-                    policy_path,
-                    total_findings,
-                    total_score,
-                    overall_severity,
-                    created_at
-                )
-                SELECT
-                    CAST(run_id AS TEXT),
-                    CAST(target AS TEXT),
-                    CAST(older_snapshot_path AS TEXT),
-                    CAST(newer_snapshot_path AS TEXT),
-                    CAST(policy_path AS TEXT),
-                    CAST(total_findings AS INTEGER),
-                    CAST(total_score AS INTEGER),
-                    CAST(overall_severity AS TEXT),
-                    CAST(created_at AS TEXT)
-                FROM drift_runs_legacy_incompatible
-                "#,
-            ),
-        )?;
-
-        self.repair_table_if_needed(
             "findings",
-            &[
-                ("finding_id", "TEXT"),
-                ("run_id", "TEXT"),
-                ("target", "TEXT"),
-                ("severity", "TEXT"),
-                ("state", "TEXT"),
-                ("category", "TEXT"),
-                ("title", "TEXT"),
-                ("resource", "TEXT"),
-                ("asset_type", "TEXT"),
-                ("environment", "TEXT"),
-                ("criticality", "TEXT"),
-                ("score", "INTEGER"),
-                ("tags_json", "TEXT"),
-                ("description", "TEXT"),
-                ("is_suppressed", "INTEGER"),
-                ("created_at", "TEXT"),
-            ],
-            r#"
-            CREATE TABLE findings (
-                finding_id TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                target TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                state TEXT NOT NULL,
-                category TEXT NOT NULL,
-                title TEXT NOT NULL,
-                resource TEXT NOT NULL,
-                asset_type TEXT NOT NULL,
-                environment TEXT NOT NULL,
-                criticality TEXT NOT NULL,
-                score INTEGER NOT NULL,
-                tags_json TEXT NOT NULL,
-                description TEXT NOT NULL,
-                is_suppressed INTEGER NOT NULL,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (finding_id, run_id)
-            )
-            "#,
-            Some(
-                r#"
-                INSERT OR IGNORE INTO findings (
-                    finding_id,
-                    run_id,
-                    target,
-                    severity,
-                    state,
-                    category,
-                    title,
-                    resource,
-                    asset_type,
-                    environment,
-                    criticality,
-                    score,
-                    tags_json,
-                    description,
-                    is_suppressed,
-                    created_at
-                )
-                SELECT
-                    CAST(finding_id AS TEXT),
-                    CAST(run_id AS TEXT),
-                    CAST(target AS TEXT),
-                    CAST(severity AS TEXT),
-                    CAST(state AS TEXT),
-                    CAST(category AS TEXT),
-                    CAST(title AS TEXT),
-                    CAST(resource AS TEXT),
-                    CAST(asset_type AS TEXT),
-                    CAST(environment AS TEXT),
-                    CAST(criticality AS TEXT),
-                    CAST(score AS INTEGER),
-                    CAST(tags_json AS TEXT),
-                    CAST(description AS TEXT),
-                    CAST(is_suppressed AS INTEGER),
-                    CAST(created_at AS TEXT)
-                FROM findings_legacy_incompatible
-                "#,
-            ),
-        )?;
-
-        self.repair_table_if_needed(
             "telemetry",
-            &[
-                ("telemetry_id", "TEXT"),
-                ("name", "TEXT"),
-                ("target", "TEXT"),
-                ("duration_ms", "TEXT"),
-                ("metadata_json", "TEXT"),
-                ("created_at", "TEXT"),
-            ],
-            r#"
-            CREATE TABLE telemetry (
-                telemetry_id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                target TEXT,
-                duration_ms TEXT NOT NULL,
-                metadata_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            "#,
-            Some(
-                r#"
-                INSERT OR IGNORE INTO telemetry (
-                    telemetry_id,
-                    name,
-                    target,
-                    duration_ms,
-                    metadata_json,
-                    created_at
-                )
-                SELECT
-                    CAST(telemetry_id AS TEXT),
-                    CAST(name AS TEXT),
-                    CAST(target AS TEXT),
-                    CAST(duration_ms AS TEXT),
-                    CAST(metadata_json AS TEXT),
-                    CAST(created_at AS TEXT)
-                FROM telemetry_legacy_incompatible
-                "#,
-            ),
-        )?;
-
-        self.repair_table_if_needed(
             "jobs",
-            &[
-                ("job_id", "TEXT"),
-                ("target", "TEXT"),
-                ("profile", "TEXT"),
-                ("interval_seconds", "INTEGER"),
-                ("enabled", "INTEGER"),
-                ("policy_path", "TEXT"),
-                ("last_run_at", "TEXT"),
-                ("created_at", "TEXT"),
-            ],
-            r#"
-            CREATE TABLE jobs (
-                job_id TEXT PRIMARY KEY,
-                target TEXT NOT NULL,
-                profile TEXT NOT NULL,
-                interval_seconds INTEGER NOT NULL,
-                enabled INTEGER NOT NULL,
-                policy_path TEXT,
-                last_run_at TEXT,
-                created_at TEXT NOT NULL
-            )
-            "#,
-            Some(
-                r#"
-                INSERT OR IGNORE INTO jobs (
-                    job_id,
-                    target,
-                    profile,
-                    interval_seconds,
-                    enabled,
-                    policy_path,
-                    last_run_at,
-                    created_at
-                )
-                SELECT
-                    CAST(job_id AS TEXT),
-                    CAST(target AS TEXT),
-                    CAST(profile AS TEXT),
-                    CAST(interval_seconds AS INTEGER),
-                    CAST(enabled AS INTEGER),
-                    CAST(policy_path AS TEXT),
-                    CAST(last_run_at AS TEXT),
-                    CAST(created_at AS TEXT)
-                FROM jobs_legacy_incompatible
-                "#,
-            ),
-        )?;
-
-        self.repair_table_if_needed(
             "baseline_entries",
-            &[("resource", "TEXT"), ("created_at", "TEXT")],
-            r#"
-            CREATE TABLE baseline_entries (
-                resource TEXT PRIMARY KEY,
-                created_at TEXT NOT NULL
-            )
-            "#,
-            Some(
-                r#"
-                INSERT OR IGNORE INTO baseline_entries (
-                    resource,
-                    created_at
-                )
-                SELECT
-                    CAST(resource AS TEXT),
-                    CAST(created_at AS TEXT)
-                FROM baseline_entries_legacy_incompatible
-                "#,
-            ),
-        )?;
-
-        self.repair_table_if_needed(
             "episodes",
-            &[
-                ("episode_id", "TEXT"),
-                ("target", "TEXT"),
-                ("title", "TEXT"),
-                ("kind", "TEXT"),
-                ("severity", "TEXT"),
-                ("criticality", "TEXT"),
-                ("score", "INTEGER"),
-                ("state", "TEXT"),
-                ("resource_count", "INTEGER"),
-                ("resources_json", "TEXT"),
-                ("cluster_ids_json", "TEXT"),
-                ("started_at", "TEXT"),
-                ("ended_at", "TEXT"),
-                ("summary", "TEXT"),
-                ("explanation_json", "TEXT"),
-                ("created_at", "TEXT"),
-            ],
-            r#"
-            CREATE TABLE episodes (
-                episode_id TEXT PRIMARY KEY,
-                target TEXT NOT NULL,
-                title TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                severity TEXT NOT NULL,
-                criticality TEXT NOT NULL,
-                score INTEGER NOT NULL,
-                state TEXT NOT NULL,
-                resource_count INTEGER NOT NULL,
-                resources_json TEXT NOT NULL,
-                cluster_ids_json TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                ended_at TEXT NOT NULL,
-                summary TEXT NOT NULL,
-                explanation_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            "#,
-            Some(
-                r#"
-                INSERT OR IGNORE INTO episodes (
-                    episode_id,
-                    target,
-                    title,
-                    kind,
-                    severity,
-                    criticality,
-                    score,
-                    state,
-                    resource_count,
-                    resources_json,
-                    cluster_ids_json,
-                    started_at,
-                    ended_at,
-                    summary,
-                    explanation_json,
-                    created_at
-                )
-                SELECT
-                    CAST(episode_id AS TEXT),
-                    CAST(target AS TEXT),
-                    CAST(title AS TEXT),
-                    CAST(kind AS TEXT),
-                    CAST(severity AS TEXT),
-                    CAST(criticality AS TEXT),
-                    CAST(score AS INTEGER),
-                    CAST(state AS TEXT),
-                    CAST(resource_count AS INTEGER),
-                    CAST(resources_json AS TEXT),
-                    CAST(cluster_ids_json AS TEXT),
-                    CAST(started_at AS TEXT),
-                    CAST(ended_at AS TEXT),
-                    CAST(summary AS TEXT),
-                    CAST(explanation_json AS TEXT),
-                    CAST(created_at AS TEXT)
-                FROM episodes_legacy_incompatible
-                "#,
-            ),
-        )?;
-
-        self.repair_table_if_needed(
             "graphs",
-            &[
-                ("graph_id", "TEXT"),
-                ("target", "TEXT"),
-                ("node_count", "INTEGER"),
-                ("edge_count", "INTEGER"),
-                ("generated_at", "TEXT"),
-                ("summary_json", "TEXT"),
-                ("created_at", "TEXT"),
-            ],
-            r#"
-            CREATE TABLE graphs (
-                graph_id TEXT PRIMARY KEY,
-                target TEXT NOT NULL,
-                node_count INTEGER NOT NULL,
-                edge_count INTEGER NOT NULL,
-                generated_at TEXT NOT NULL,
-                summary_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            "#,
-            Some(
-                r#"
-                INSERT OR IGNORE INTO graphs (
-                    graph_id,
-                    target,
-                    node_count,
-                    edge_count,
-                    generated_at,
-                    summary_json,
-                    created_at
-                )
-                SELECT
-                    CAST(graph_id AS TEXT),
-                    CAST(target AS TEXT),
-                    CAST(node_count AS INTEGER),
-                    CAST(edge_count AS INTEGER),
-                    CAST(generated_at AS TEXT),
-                    CAST(summary_json AS TEXT),
-                    CAST(created_at AS TEXT)
-                FROM graphs_legacy_incompatible
-                "#,
-            ),
-        )?;
-
-        self.repair_table_if_needed(
             "graph_nodes",
-            &[
-                ("graph_id", "TEXT"),
-                ("node_id", "TEXT"),
-                ("target", "TEXT"),
-                ("kind", "TEXT"),
-                ("label", "TEXT"),
-                ("first_seen", "TEXT"),
-                ("last_seen", "TEXT"),
-                ("attributes_json", "TEXT"),
-            ],
-            r#"
-            CREATE TABLE graph_nodes (
-                graph_id TEXT NOT NULL,
-                node_id TEXT NOT NULL,
-                target TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                label TEXT NOT NULL,
-                first_seen TEXT,
-                last_seen TEXT,
-                attributes_json TEXT NOT NULL,
-                PRIMARY KEY (graph_id, node_id)
-            )
-            "#,
-            Some(
-                r#"
-                INSERT OR IGNORE INTO graph_nodes (
-                    graph_id,
-                    node_id,
-                    target,
-                    kind,
-                    label,
-                    first_seen,
-                    last_seen,
-                    attributes_json
-                )
-                SELECT
-                    CAST(graph_id AS TEXT),
-                    CAST(node_id AS TEXT),
-                    CAST(target AS TEXT),
-                    CAST(kind AS TEXT),
-                    CAST(label AS TEXT),
-                    CAST(first_seen AS TEXT),
-                    CAST(last_seen AS TEXT),
-                    CAST(attributes_json AS TEXT)
-                FROM graph_nodes_legacy_incompatible
-                "#,
-            ),
-        )?;
-
-        self.repair_table_if_needed(
             "graph_edges",
-            &[
-                ("graph_id", "TEXT"),
-                ("edge_id", "TEXT"),
-                ("target", "TEXT"),
-                ("from_node", "TEXT"),
-                ("to_node", "TEXT"),
-                ("kind", "TEXT"),
-                ("weight", "INTEGER"),
-                ("first_seen", "TEXT"),
-                ("last_seen", "TEXT"),
-                ("attributes_json", "TEXT"),
-            ],
-            r#"
-            CREATE TABLE graph_edges (
-                graph_id TEXT NOT NULL,
-                edge_id TEXT NOT NULL,
-                target TEXT NOT NULL,
-                from_node TEXT NOT NULL,
-                to_node TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                weight INTEGER NOT NULL,
-                first_seen TEXT,
-                last_seen TEXT,
-                attributes_json TEXT NOT NULL,
-                PRIMARY KEY (graph_id, edge_id)
-            )
-            "#,
-            Some(
-                r#"
-                INSERT OR IGNORE INTO graph_edges (
-                    graph_id,
-                    edge_id,
-                    target,
-                    from_node,
-                    to_node,
-                    kind,
-                    weight,
-                    first_seen,
-                    last_seen,
-                    attributes_json
-                )
-                SELECT
-                    CAST(graph_id AS TEXT),
-                    CAST(edge_id AS TEXT),
-                    CAST(target AS TEXT),
-                    CAST(from_node AS TEXT),
-                    CAST(to_node AS TEXT),
-                    CAST(kind AS TEXT),
-                    CAST(weight AS INTEGER),
-                    CAST(first_seen AS TEXT),
-                    CAST(last_seen AS TEXT),
-                    CAST(attributes_json AS TEXT)
-                FROM graph_edges_legacy_incompatible
-                "#,
-            ),
-        )?;
-
-        self.repair_table_if_needed(
             "saved_queries",
-            &[
-                ("name", "TEXT"),
-                ("expression", "TEXT"),
-                ("created_at", "TEXT"),
-                ("updated_at", "TEXT"),
-            ],
-            r#"
-            CREATE TABLE saved_queries (
-                name TEXT PRIMARY KEY,
-                expression TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            "#,
-            Some(
-                r#"
-                INSERT OR IGNORE INTO saved_queries (
-                    name,
-                    expression,
-                    created_at,
-                    updated_at
-                )
-                SELECT
-                    CAST(name AS TEXT),
-                    CAST(expression AS TEXT),
-                    CAST(created_at AS TEXT),
-                    CAST(updated_at AS TEXT)
-                FROM saved_queries_legacy_incompatible
-                "#,
-            ),
-        )?;
+            "finding_state",
+        ] {
+            self.ensure_scope_columns(table)?;
+        }
 
-        self.repair_table_if_needed(
-            "audit_events",
-            &[
-                ("audit_id", "TEXT"),
-                ("tenant_id", "TEXT"),
-                ("project_id", "TEXT"),
-                ("actor", "TEXT"),
-                ("action", "TEXT"),
-                ("resource_type", "TEXT"),
-                ("resource_id", "TEXT"),
-                ("details_json", "TEXT"),
-                ("created_at", "TEXT"),
-            ],
-            r#"
-            CREATE TABLE audit_events (
-                audit_id TEXT PRIMARY KEY,
-                tenant_id TEXT NOT NULL,
-                project_id TEXT NOT NULL,
-                actor TEXT NOT NULL,
-                action TEXT NOT NULL,
-                resource_type TEXT NOT NULL,
-                resource_id TEXT NOT NULL,
-                details_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            "#,
-            None,
-        )?;
+        self.rebuild_saved_queries_if_needed()?;
+        self.rebuild_finding_state_if_needed()?;
+        Ok(())
+    }
+
+    fn ensure_scope_columns(&self, table: &str) -> Result<()> {
+        let columns = self.read_table_info(table)?;
+        let has_tenant = columns.iter().any(|c| c.name == "tenant_id");
+        let has_project = columns.iter().any(|c| c.name == "project_id");
+
+        if !has_tenant {
+            self.conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN tenant_id TEXT NOT NULL DEFAULT 'default';"
+            ))?;
+        }
+
+        if !has_project {
+            self.conn.execute_batch(&format!(
+                "ALTER TABLE {table} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';"
+            ))?;
+        }
 
         Ok(())
     }
 
-    fn repair_table_if_needed(
-        &self,
-        table: &str,
-        expected: &[(&str, &str)],
-        create_sql: &str,
-        copy_sql: Option<&str>,
-    ) -> Result<()> {
-        let columns = self.read_table_info(table)?;
-        if columns.is_empty() {
+    fn rebuild_saved_queries_if_needed(&self) -> Result<()> {
+        let columns = self.read_table_info("saved_queries")?;
+        let has_tenant = columns.iter().any(|c| c.name == "tenant_id");
+        let has_project = columns.iter().any(|c| c.name == "project_id");
+        if !has_tenant || !has_project {
             return Ok(());
         }
 
-        let compatible = expected.iter().all(|(name, expected_type)| {
-            columns.iter().any(|column| {
-                column.name == *name
-                    && column
-                        .declared_type
-                        .to_ascii_uppercase()
-                        .contains(&expected_type.to_ascii_uppercase())
-            })
-        });
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS saved_queries_v026 (
+                tenant_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                expression TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, name)
+            );
 
-        if compatible {
+            INSERT OR IGNORE INTO saved_queries_v026 (
+                tenant_id, project_id, name, expression, created_at, updated_at
+            )
+            SELECT
+                COALESCE(tenant_id, 'default'),
+                COALESCE(project_id, 'default'),
+                name,
+                expression,
+                created_at,
+                updated_at
+            FROM saved_queries;
+
+            DROP TABLE saved_queries;
+            ALTER TABLE saved_queries_v026 RENAME TO saved_queries;
+            "#,
+        )?;
+        Ok(())
+    }
+
+    fn rebuild_finding_state_if_needed(&self) -> Result<()> {
+        let columns = self.read_table_info("finding_state")?;
+        let has_tenant = columns.iter().any(|c| c.name == "tenant_id");
+        let has_project = columns.iter().any(|c| c.name == "project_id");
+        if !has_tenant || !has_project {
             return Ok(());
         }
 
-        let legacy = format!("{table}_legacy_incompatible");
-        self.conn
-            .execute_batch(&format!("DROP TABLE IF EXISTS {legacy};"))?;
-        self.conn
-            .execute_batch(&format!("ALTER TABLE {table} RENAME TO {legacy};"))?;
-        self.conn.execute_batch(create_sql)?;
+        self.conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS finding_state_v026 (
+                tenant_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                finding_id TEXT NOT NULL,
+                operational_state TEXT NOT NULL,
+                owner TEXT,
+                notes TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, finding_id)
+            );
 
-        if let Some(copy_sql) = copy_sql {
-            self.conn.execute_batch(copy_sql)?;
-        }
+            INSERT OR IGNORE INTO finding_state_v026 (
+                tenant_id, project_id, finding_id, operational_state, owner, notes, updated_at
+            )
+            SELECT
+                COALESCE(tenant_id, 'default'),
+                COALESCE(project_id, 'default'),
+                finding_id,
+                operational_state,
+                owner,
+                notes,
+                updated_at
+            FROM finding_state;
 
+            DROP TABLE finding_state;
+            ALTER TABLE finding_state_v026 RENAME TO finding_state;
+            "#,
+        )?;
         Ok(())
     }
 
     fn read_table_info(&self, table: &str) -> Result<Vec<TableColumn>> {
         let pragma = format!("PRAGMA table_info({table})");
         let mut stmt = self.conn.prepare(&pragma)?;
-        let rows = stmt.query_map([], |row| {
-            Ok(TableColumn {
-                name: row.get(1)?,
-                declared_type: row.get(2)?,
-            })
-        })?;
+        let rows = stmt.query_map([], |row| Ok(TableColumn { name: row.get(1)? }))?;
 
         let mut columns = Vec::new();
         for row in rows {
@@ -2601,6 +2757,34 @@ impl AtlasStore {
         }
         Ok(columns)
     }
+}
+
+fn map_job_queue_item(row: &Row<'_>) -> rusqlite::Result<JobQueueItem> {
+    let status =
+        JobQueueStatus::from_str(&row_string(row, 10)?).map_err(|e| to_sql_err(anyhow!(e)))?;
+
+    Ok(JobQueueItem {
+        queue_id: row_string(row, 0)?,
+        tenant_id: row_string(row, 1)?,
+        project_id: row_string(row, 2)?,
+        job_id: row_string(row, 3)?,
+        target: row_string(row, 4)?,
+        profile: row_string(row, 5)?,
+        policy_path: row_optional_string(row, 6)?,
+        trigger: row_string(row, 7)?,
+        requested_by: row_optional_string(row, 8)?,
+        persist_artifacts: row_bool(row, 9)?,
+        status,
+        attempts: row_u64(row, 11)? as u32,
+        max_attempts: row_u64(row, 12)? as u32,
+        available_at: parse_datetime(row_string(row, 13)?)?,
+        claimed_by: row_optional_string(row, 14)?,
+        claimed_at: parse_optional_datetime(row_optional_string(row, 15)?),
+        lease_expires_at: parse_optional_datetime(row_optional_string(row, 16)?),
+        created_at: parse_datetime(row_string(row, 17)?)?,
+        updated_at: parse_datetime(row_string(row, 18)?)?,
+        last_error: row_optional_string(row, 19)?,
+    })
 }
 
 fn compute_snapshot_hash(path: &Path) -> Result<String> {
@@ -2691,6 +2875,7 @@ fn row_bool(row: &Row<'_>, index: usize) -> rusqlite::Result<bool> {
 mod tests {
     use super::*;
     use atlas_graph::{EdgeKind, ExposureGraph, GraphNode, NodeKind};
+    use atlas_jobs::{JobDispatchRequest, JobTrigger};
     use std::collections::BTreeMap;
 
     #[test]
@@ -2702,6 +2887,8 @@ mod tests {
 
         let store = AtlasStore::open(&db_path).unwrap();
         store.initialize().unwrap();
+
+        let scope = StorageScope::new("tenant-a", "project-x");
 
         let mut graph = ExposureGraph::empty("example.com");
         graph.nodes.push(GraphNode {
@@ -2726,15 +2913,20 @@ mod tests {
         });
         graph.recompute_metadata();
 
-        store.store_graph("example.com", &graph).unwrap();
-        let loaded = store.load_latest_graph("example.com").unwrap().unwrap();
+        store
+            .store_graph_scoped(&scope, "example.com", &graph)
+            .unwrap();
+        let loaded = store
+            .load_latest_graph_scoped(&scope, "example.com")
+            .unwrap()
+            .unwrap();
 
         assert_eq!(loaded.target, "example.com");
         assert!(loaded.node_count >= 1);
     }
 
     #[test]
-    fn stores_and_loads_saved_query() {
+    fn stores_and_loads_saved_query_scoped() {
         let db_path = std::env::temp_dir().join(format!(
             "atlas-store-saved-query-test-{}.db",
             Utc::now().timestamp_nanos_opt().unwrap_or(0)
@@ -2743,23 +2935,33 @@ mod tests {
         let store = AtlasStore::open(&db_path).unwrap();
         store.initialize().unwrap();
 
+        let scope = StorageScope::new("tenant-a", "project-x");
+
         store
-            .save_saved_query("risky-admin", "services label~admin")
+            .save_saved_query_scoped(&scope, "risky-admin", "services label~admin")
             .unwrap();
 
-        let item = store.load_saved_query("risky-admin").unwrap().unwrap();
+        let item = store
+            .load_saved_query_scoped(&scope, "risky-admin")
+            .unwrap()
+            .unwrap();
         assert_eq!(item.name, "risky-admin");
         assert_eq!(item.expression, "services label~admin");
 
-        let list = store.list_saved_queries().unwrap();
+        let list = store.list_saved_queries_scoped(&scope).unwrap();
         assert_eq!(list.len(), 1);
 
-        store.delete_saved_query("risky-admin").unwrap();
-        assert!(store.load_saved_query("risky-admin").unwrap().is_none());
+        store
+            .delete_saved_query_scoped(&scope, "risky-admin")
+            .unwrap();
+        assert!(store
+            .load_saved_query_scoped(&scope, "risky-admin")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn sets_and_reads_finding_operational_state() {
+    fn sets_and_reads_finding_operational_state_scoped() {
         let db_path = std::env::temp_dir().join(format!(
             "atlas-store-finding-state-test-{}.db",
             Utc::now().timestamp_nanos_opt().unwrap_or(0)
@@ -2768,30 +2970,36 @@ mod tests {
         let store = AtlasStore::open(&db_path).unwrap();
         store.initialize().unwrap();
 
+        let scope = StorageScope::new("tenant-a", "project-x");
+
         store
             .conn
             .execute(
                 r#"
-            INSERT INTO findings (
-                finding_id,
-                run_id,
-                target,
-                severity,
-                state,
-                category,
-                title,
-                resource,
-                asset_type,
-                environment,
-                criticality,
-                score,
-                tags_json,
-                description,
-                is_suppressed,
-                created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
-            "#,
+                INSERT INTO findings (
+                    tenant_id,
+                    project_id,
+                    finding_id,
+                    run_id,
+                    target,
+                    severity,
+                    state,
+                    category,
+                    title,
+                    resource,
+                    asset_type,
+                    environment,
+                    criticality,
+                    score,
+                    tags_json,
+                    description,
+                    is_suppressed,
+                    created_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                "#,
                 params![
+                    scope.tenant_id,
+                    scope.project_id,
                     "f1",
                     "r1",
                     "example.com",
@@ -2813,12 +3021,19 @@ mod tests {
             .unwrap();
 
         store
-            .set_finding_operational_state("f1", "acknowledged")
+            .set_finding_operational_state_scoped(&scope, "f1", "acknowledged")
             .unwrap();
-        store.assign_finding_owner("f1", "claudio").unwrap();
-        store.set_finding_note("f1", "en revisión").unwrap();
+        store
+            .assign_finding_owner_scoped(&scope, "f1", "claudio")
+            .unwrap();
+        store
+            .set_finding_note_scoped(&scope, "f1", "en revisión")
+            .unwrap();
 
-        let state = store.get_finding_operational_state("f1").unwrap().unwrap();
+        let state = store
+            .get_finding_operational_state_scoped(&scope, "f1")
+            .unwrap()
+            .unwrap();
         assert_eq!(state.operational_state, "acknowledged");
         assert_eq!(state.owner.as_deref(), Some("claudio"));
         assert_eq!(state.notes.as_deref(), Some("en revisión"));
@@ -2851,5 +3066,40 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].tenant_id, "tenant-a");
         assert_eq!(events[0].project_id, "project-x");
+    }
+
+    #[test]
+    fn enqueues_job_dispatch_scoped() {
+        let db_path = std::env::temp_dir().join(format!(
+            "atlas-store-queue-test-{}.db",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+
+        let store = AtlasStore::open(&db_path).unwrap();
+        store.initialize().unwrap();
+
+        let scope = StorageScope::new("tenant-a", "project-x");
+        let dispatch = JobDispatchRequest::new(
+            "tenant-a",
+            "project-x",
+            "job-1",
+            "example.com",
+            "standard",
+            JobTrigger::Manual,
+        )
+        .requested_by("claudio")
+        .persist_artifacts(true);
+
+        let item = store
+            .enqueue_job_dispatch_scoped(&scope, &dispatch)
+            .unwrap();
+
+        assert_eq!(item.tenant_id, "tenant-a");
+        assert_eq!(item.project_id, "project-x");
+        assert_eq!(item.job_id, "job-1");
+
+        let listed = store.list_job_queue_scoped(&scope, 10).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].queue_id, item.queue_id);
     }
 }

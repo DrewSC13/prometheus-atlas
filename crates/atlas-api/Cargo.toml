@@ -36,6 +36,8 @@ atlas-graph = { path = "../atlas-graph" }
 atlas-jobs = { path = "../atlas-jobs" }
 atlas-plugins = { path = "../atlas-plugins" }
 atlas-query = { path = "../atlas-query" }
+atlas-queue = { path = "../atlas-queue" }
 atlas-report = { path = "../atlas-report" }
 atlas-snapshot = { path = "../atlas-snapshot" }
 atlas-store = { path = "../atlas-store" }
+atlas-tenancy = { path = "../atlas-tenancy" }

@@ -1,8 +1,10 @@
 use atlas_jobs::AtlasJob;
+use atlas_queue::JobQueueItem;
 use atlas_store::{
     StoredAuditEvent, StoredCurrentFinding, StoredFinding, StoredSavedQuery, StoredSnapshot,
     StoredTelemetryEvent,
 };
+use atlas_tenancy::{AtlasUser, Membership, Organization, Workspace};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -95,6 +97,32 @@ pub struct BootstrapTokenRequest {
     pub role: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateOrganizationRequest {
+    pub name: String,
+    pub slug: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateWorkspaceRequest {
+    pub name: String,
+    pub slug: String,
+    pub environment: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpsertUserRequest {
+    pub subject: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateMembershipRequest {
+    pub user_id: String,
+    pub role: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TokenResponse {
     pub access_token: String,
@@ -121,8 +149,14 @@ pub struct HealthResponse {
 
 pub type FindingsResponse = PagedEnvelope<StoredCurrentFinding>;
 pub type JobsResponse = PagedEnvelope<AtlasJob>;
+pub type JobQueueResponse = PagedEnvelope<JobQueueItem>;
 pub type SnapshotsResponse = PagedEnvelope<StoredSnapshot>;
 pub type RawFindingsResponse = PagedEnvelope<StoredFinding>;
 pub type AuditResponse = PagedEnvelope<StoredAuditEvent>;
 pub type QueriesResponse = PagedEnvelope<StoredSavedQuery>;
 pub type TelemetryResponse = PagedEnvelope<StoredTelemetryEvent>;
+
+pub type OrganizationsResponse = PagedEnvelope<Organization>;
+pub type WorkspacesResponse = PagedEnvelope<Workspace>;
+pub type UsersResponse = PagedEnvelope<AtlasUser>;
+pub type MembershipsResponse = PagedEnvelope<Membership>;

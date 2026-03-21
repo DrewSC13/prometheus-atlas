@@ -20,4 +20,6 @@ atlas-drift = { path = "../atlas-drift" }
 atlas-episodes = { path = "../atlas-episodes" }
 atlas-graph = { path = "../atlas-graph" }
 atlas-jobs = { path = "../atlas-jobs" }
+atlas-queue = { path = "../atlas-queue" }
 atlas-snapshot = { path = "../atlas-snapshot" }
+atlas-tenancy = { path = "../atlas-tenancy" }

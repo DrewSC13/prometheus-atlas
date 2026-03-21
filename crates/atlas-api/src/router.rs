@@ -62,6 +62,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/jobs/:job_id/disable", post(jobs::disable_job))
         .route("/v1/jobs/:job_id/run", post(jobs::run_job))
         .route("/v1/jobs/:job_id/delete", post(jobs::delete_job))
+        .route("/v1/job-queue", get(jobs::list_job_queue))
+        .route("/v1/job-queue/:queue_id", get(jobs::get_queue_item))
         .route(
             "/v1/queries",
             get(queries::list_queries).post(queries::save_query),
