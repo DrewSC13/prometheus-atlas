@@ -1,5 +1,9 @@
-use axum::{async_trait, extract::FromRequestParts, http::request::Parts};
-use jsonwebtoken::{encode, EncodingKey, Header};
+use axum::{
+    async_trait,
+    extract::FromRequestParts,
+    http::{header::AUTHORIZATION, request::Parts},
+};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 
 use crate::{error::ApiError, state::AppState};
@@ -80,13 +84,49 @@ impl AuthContext {
 }
 
 #[async_trait]
-impl<S> FromRequestParts<S> for AuthContext
-where
-    S: Send + Sync,
-{
+impl FromRequestParts<std::sync::Arc<AppState>> for AuthContext {
     type Rejection = ApiError;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &std::sync::Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        if let Some(value) = parts.headers.get(AUTHORIZATION) {
+            let auth_header = value
+                .to_str()
+                .map_err(|_| ApiError::unauthorized("authorization header inválido"))?;
+
+            if let Some(token) = auth_header.strip_prefix("Bearer ") {
+                let mut validation = Validation::default();
+                validation.set_issuer(&[state.config.auth.issuer.as_str()]);
+
+                let decoded = decode::<TokenClaims>(
+                    token.trim(),
+                    &DecodingKey::from_secret(state.config.auth.jwt_secret.as_bytes()),
+                    &validation,
+                )
+                .map_err(|err| ApiError::unauthorized(format!("token inválido: {err}")))?;
+
+                let claims = decoded.claims;
+                let roles = if claims.roles.is_empty() {
+                    vec!["reader".to_string()]
+                } else {
+                    claims.roles
+                };
+
+                return Ok(Self {
+                    subject: claims.sub,
+                    tenant_id: claims.tenant_id,
+                    project_id: claims.project_id,
+                    roles,
+                });
+            }
+
+            return Err(ApiError::unauthorized(
+                "authorization debe usar esquema Bearer",
+            ));
+        }
+
         let tenant_id = parts
             .headers
             .get("x-tenant-id")
