@@ -4,6 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AppConfig {
     pub storage: StorageConfig,
     pub logging: LoggingConfig,
@@ -20,51 +21,118 @@ pub struct AppConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct StorageConfig {
     pub path: String,
 }
 
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            path: ".atlas/atlas.db".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LoggingConfig {
     pub level: String,
     pub json: bool,
 }
 
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: "info".to_string(),
+            json: false,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct TelemetryConfig {
     pub enabled: bool,
 }
 
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct DriftConfig {
     pub persist_by_default: bool,
     pub profile: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Default for DriftConfig {
+    fn default() -> Self {
+        Self {
+            persist_by_default: true,
+            profile: "standard".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PluginConfig {
     pub enabled: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct JobConfig {
     pub default_interval_seconds: u64,
 }
 
+impl Default for JobConfig {
+    fn default() -> Self {
+        Self {
+            default_interval_seconds: 3600,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ScanProfile {
     pub name: String,
     pub ports: Vec<u16>,
     pub timeout_ms: u64,
 }
 
+impl Default for ScanProfile {
+    fn default() -> Self {
+        Self {
+            name: "standard".to_string(),
+            ports: vec![80, 443],
+            timeout_ms: 3000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ServerConfig {
     pub bind: String,
     pub request_timeout_ms: u64,
 }
 
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            bind: "0.0.0.0:8080".to_string(),
+            request_timeout_ms: 30_000,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AuthConfig {
     pub issuer: String,
     pub jwt_secret: String,
@@ -73,7 +141,20 @@ pub struct AuthConfig {
     pub api_keys: Vec<ApiKeyConfig>,
 }
 
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            issuer: "prometheus-atlas".to_string(),
+            jwt_secret: "change-me-super-secret-atlas-key".to_string(),
+            jwt_expiration_seconds: 86_400,
+            bootstrap_token: "atlas-bootstrap-admin".to_string(),
+            api_keys: vec![ApiKeyConfig::default()],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ApiKeyConfig {
     pub key_id: String,
     pub secret: String,
@@ -83,23 +164,67 @@ pub struct ApiKeyConfig {
     pub enabled: bool,
 }
 
+impl Default for ApiKeyConfig {
+    fn default() -> Self {
+        Self {
+            key_id: "local-admin".to_string(),
+            secret: "atlas-local-admin-key".to_string(),
+            tenant_id: "local".to_string(),
+            project_id: "default".to_string(),
+            role: "admin".to_string(),
+            enabled: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SaasConfig {
     pub default_tenant_id: String,
     pub default_project_id: String,
     pub default_environment: String,
 }
 
+impl Default for SaasConfig {
+    fn default() -> Self {
+        Self {
+            default_tenant_id: "local".to_string(),
+            default_project_id: "default".to_string(),
+            default_environment: "local".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct PaginationConfig {
     pub default_limit: usize,
     pub max_limit: usize,
 }
 
+impl Default for PaginationConfig {
+    fn default() -> Self {
+        Self {
+            default_limit: 25,
+            max_limit: 200,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AlertConfig {
     pub enabled: bool,
     pub default_severity_threshold: String,
+}
+
+impl Default for AlertConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_severity_threshold: "medium".to_string(),
+        }
+    }
 }
 
 impl AppConfig {
@@ -177,22 +302,12 @@ impl AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            storage: StorageConfig {
-                path: ".atlas/atlas.db".to_string(),
-            },
-            logging: LoggingConfig {
-                level: "info".to_string(),
-                json: false,
-            },
-            telemetry: TelemetryConfig { enabled: true },
-            drift: DriftConfig {
-                persist_by_default: true,
-                profile: "standard".to_string(),
-            },
-            plugins: PluginConfig { enabled: vec![] },
-            jobs: JobConfig {
-                default_interval_seconds: 3600,
-            },
+            storage: StorageConfig::default(),
+            logging: LoggingConfig::default(),
+            telemetry: TelemetryConfig::default(),
+            drift: DriftConfig::default(),
+            plugins: PluginConfig::default(),
+            jobs: JobConfig::default(),
             profiles: vec![
                 ScanProfile {
                     name: "standard".to_string(),
@@ -205,37 +320,11 @@ impl Default for AppConfig {
                     timeout_ms: 5000,
                 },
             ],
-            server: ServerConfig {
-                bind: "0.0.0.0:8080".to_string(),
-                request_timeout_ms: 30_000,
-            },
-            auth: AuthConfig {
-                issuer: "prometheus-atlas".to_string(),
-                jwt_secret: "change-me-super-secret-atlas-key".to_string(),
-                jwt_expiration_seconds: 86_400,
-                bootstrap_token: "atlas-bootstrap-admin".to_string(),
-                api_keys: vec![ApiKeyConfig {
-                    key_id: "local-admin".to_string(),
-                    secret: "atlas-local-admin-key".to_string(),
-                    tenant_id: "local".to_string(),
-                    project_id: "default".to_string(),
-                    role: "admin".to_string(),
-                    enabled: true,
-                }],
-            },
-            saas: SaasConfig {
-                default_tenant_id: "local".to_string(),
-                default_project_id: "default".to_string(),
-                default_environment: "local".to_string(),
-            },
-            pagination: PaginationConfig {
-                default_limit: 25,
-                max_limit: 200,
-            },
-            alerts: AlertConfig {
-                enabled: true,
-                default_severity_threshold: "medium".to_string(),
-            },
+            server: ServerConfig::default(),
+            auth: AuthConfig::default(),
+            saas: SaasConfig::default(),
+            pagination: PaginationConfig::default(),
+            alerts: AlertConfig::default(),
         }
     }
 }
