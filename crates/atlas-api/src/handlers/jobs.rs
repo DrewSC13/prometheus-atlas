@@ -194,9 +194,12 @@ pub async fn run_job(
     State(state): State<Arc<AppState>>,
     auth: AuthContext,
     Path(job_id): Path<String>,
-    Json(payload): Json<RunJobRequest>,
+    payload: Option<Json<RunJobRequest>>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let scope = scope_from_auth(&auth);
+    let persist = payload
+        .map(|Json(body)| body.persist.unwrap_or(false))
+        .unwrap_or(false);
 
     let store = state.store.lock().map_err(|_| {
         (
@@ -222,7 +225,7 @@ pub async fn run_job(
             "job.run",
             "job",
             &job.job_id,
-            &json!({ "persist": payload.persist.unwrap_or(false) }),
+            &json!({ "persist": persist }),
         )
         .map_err(internal_error)?;
 
@@ -230,7 +233,7 @@ pub async fn run_job(
         "ok": true,
         "job_id": job.job_id,
         "target": job.target,
-        "persist": payload.persist.unwrap_or(false),
+        "persist": persist,
         "executed": false,
         "message": "handler API registrado; ejecución real queda delegada al runtime/CLI"
     })))

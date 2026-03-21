@@ -1,5 +1,8 @@
 use atlas_jobs::AtlasJob;
-use atlas_store::{StoredAuditEvent, StoredCurrentFinding, StoredFinding, StoredSnapshot};
+use atlas_store::{
+    StoredAuditEvent, StoredCurrentFinding, StoredFinding, StoredSavedQuery, StoredSnapshot,
+    StoredTelemetryEvent,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,7 +55,7 @@ pub struct FindingsQuery {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FindingPatchRequest {
-    pub action: String,
+    pub operational_state: Option<String>,
     pub owner: Option<String>,
     pub note: Option<String>,
 }
@@ -62,6 +65,12 @@ pub struct QueryRequestBody {
     pub target: String,
     pub expression: String,
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SaveQueryRequest {
+    pub name: String,
+    pub expression: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -78,19 +87,19 @@ pub struct JobRunRequest {
     pub persist: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct TokenResponse {
-    pub access_token: String,
-    pub token_type: String,
-    pub expires_in: u64,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct BootstrapTokenRequest {
     pub subject: String,
     pub tenant_id: String,
     pub project_id: String,
     pub role: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -115,3 +124,5 @@ pub type JobsResponse = PagedEnvelope<AtlasJob>;
 pub type SnapshotsResponse = PagedEnvelope<StoredSnapshot>;
 pub type RawFindingsResponse = PagedEnvelope<StoredFinding>;
 pub type AuditResponse = PagedEnvelope<StoredAuditEvent>;
+pub type QueriesResponse = PagedEnvelope<StoredSavedQuery>;
+pub type TelemetryResponse = PagedEnvelope<StoredTelemetryEvent>;

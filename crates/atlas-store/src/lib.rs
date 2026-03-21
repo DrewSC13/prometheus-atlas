@@ -770,6 +770,15 @@ impl AtlasStore {
         Ok(())
     }
 
+    pub fn set_finding_operational_state_scoped(
+        &self,
+        _scope: &StorageScope,
+        finding_id: &str,
+        operational_state: &str,
+    ) -> Result<()> {
+        self.set_finding_operational_state(finding_id, operational_state)
+    }
+
     pub fn assign_finding_owner(&self, finding_id: &str, owner: &str) -> Result<()> {
         self.ensure_finding_for_triage(finding_id)?;
         let current = self.get_finding_operational_state(finding_id)?;
@@ -806,6 +815,15 @@ impl AtlasStore {
         Ok(())
     }
 
+    pub fn assign_finding_owner_scoped(
+        &self,
+        _scope: &StorageScope,
+        finding_id: &str,
+        owner: &str,
+    ) -> Result<()> {
+        self.assign_finding_owner(finding_id, owner)
+    }
+
     pub fn set_finding_note(&self, finding_id: &str, notes: &str) -> Result<()> {
         self.ensure_finding_for_triage(finding_id)?;
         let current = self.get_finding_operational_state(finding_id)?;
@@ -840,6 +858,15 @@ impl AtlasStore {
         )?;
 
         Ok(())
+    }
+
+    pub fn set_finding_note_scoped(
+        &self,
+        _scope: &StorageScope,
+        finding_id: &str,
+        notes: &str,
+    ) -> Result<()> {
+        self.set_finding_note(finding_id, notes)
     }
 
     pub fn list_current_findings_operational(

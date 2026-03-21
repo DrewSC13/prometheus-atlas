@@ -6,7 +6,7 @@ use crate::{
     state::AppState,
 };
 use axum::{
-    routing::{get, post},
+    routing::{get, patch, post},
     Router,
 };
 use std::sync::Arc;
@@ -32,21 +32,28 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/findings/:target/current",
             get(findings::list_current_findings),
         )
-        .route("/v1/findings/:finding_id/ack", post(findings::ack_finding))
         .route(
-            "/v1/findings/:finding_id/resolve",
+            "/v1/findings/by-id/:finding_id",
+            patch(findings::patch_finding),
+        )
+        .route(
+            "/v1/findings/by-id/:finding_id/ack",
+            post(findings::ack_finding),
+        )
+        .route(
+            "/v1/findings/by-id/:finding_id/resolve",
             post(findings::resolve_finding),
         )
         .route(
-            "/v1/findings/:finding_id/accept",
+            "/v1/findings/by-id/:finding_id/accept",
             post(findings::accept_finding),
         )
         .route(
-            "/v1/findings/:finding_id/assign",
+            "/v1/findings/by-id/:finding_id/assign",
             post(findings::assign_finding),
         )
         .route(
-            "/v1/findings/:finding_id/note",
+            "/v1/findings/by-id/:finding_id/note",
             post(findings::note_finding),
         )
         .route("/v1/jobs", get(jobs::list_jobs).post(jobs::create_job))

@@ -1,15 +1,17 @@
-use crate::{auth::AuthContext, state::AppState};
-use atlas_query::{execute_query, parse_query};
+use std::sync::Arc;
+
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     Json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::sync::Arc;
 
-type ApiResult<T> = Result<T, (StatusCode, String)>;
+use crate::{
+    auth::{scope_from_auth, AuthContext},
+    error::{ApiError, ApiResult},
+    models::{ApiEnvelope, PagedEnvelope, PaginationMeta},
+    state::AppState,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveQueryRequest {
@@ -19,131 +21,128 @@ pub struct SaveQueryRequest {
 
 pub async fn list_queries(
     State(state): State<Arc<AppState>>,
-    _auth: AuthContext,
-) -> ApiResult<Json<serde_json::Value>> {
-    let store = state.store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store lock poisoned".to_string(),
-        )
-    })?;
+    auth: AuthContext,
+) -> ApiResult<Json<PagedEnvelope<atlas_store::StoredSavedQuery>>> {
+    auth.require_read()?;
+    let scope = scope_from_auth(&auth);
 
-    let items = store.list_saved_queries().map_err(internal_error)?;
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| ApiError::internal("store lock"))?;
 
-    Ok(Json(json!({
-        "ok": true,
-        "items": items
-    })))
+    let items = store.list_saved_queries_scoped(&scope)?;
+
+    Ok(Json(PagedEnvelope {
+        data: items.clone(),
+        pagination: PaginationMeta {
+            limit: items.len(),
+            returned: items.len(),
+        },
+    }))
 }
 
 pub async fn get_query(
     State(state): State<Arc<AppState>>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Path(name): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let store = state.store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store lock poisoned".to_string(),
-        )
-    })?;
+) -> ApiResult<Json<ApiEnvelope<atlas_store::StoredSavedQuery>>> {
+    auth.require_read()?;
+    let scope = scope_from_auth(&auth);
+
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| ApiError::internal("store lock"))?;
 
     let item = store
-        .load_saved_query(&name)
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("query no encontrada: {name}"),
-            )
-        })?;
+        .load_saved_query_scoped(&scope, &name)?
+        .ok_or_else(|| ApiError::not_found(format!("query no encontrada: {name}")))?;
 
-    Ok(Json(json!({
-        "ok": true,
-        "query": item
-    })))
+    Ok(Json(ApiEnvelope { data: item }))
 }
 
 pub async fn save_query(
     State(state): State<Arc<AppState>>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Json(payload): Json<SaveQueryRequest>,
-) -> ApiResult<Json<serde_json::Value>> {
-    parse_query(&payload.expression, 25)
-        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+) -> ApiResult<Json<ApiEnvelope<atlas_store::StoredSavedQuery>>> {
+    auth.require_write()?;
 
-    let store = state.store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store lock poisoned".to_string(),
-        )
-    })?;
+    atlas_query::parse_query(&payload.expression, 25)
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
 
-    store
-        .save_saved_query(&payload.name, &payload.expression)
-        .map_err(internal_error)?;
+    let scope = scope_from_auth(&auth);
+
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| ApiError::internal("store lock"))?;
+
+    store.save_saved_query_scoped(&scope, &payload.name, &payload.expression)?;
 
     let item = store
-        .load_saved_query(&payload.name)
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "query guardada pero no recuperable".to_string(),
-            )
-        })?;
+        .load_saved_query_scoped(&scope, &payload.name)?
+        .ok_or_else(|| ApiError::internal("query guardada pero no recuperable"))?;
 
-    Ok(Json(json!({
-        "ok": true,
-        "query": item
-    })))
+    store.record_audit_event_scoped(
+        &scope,
+        &auth.subject,
+        "query.save",
+        "saved_query",
+        &payload.name,
+        &serde_json::json!({
+            "expression": payload.expression
+        }),
+    )?;
+
+    Ok(Json(ApiEnvelope { data: item }))
 }
 
 pub async fn run_query(
     State(state): State<Arc<AppState>>,
-    _auth: AuthContext,
+    auth: AuthContext,
     Path((name, target)): Path<(String, String)>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let store = state.store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store lock poisoned".to_string(),
-        )
-    })?;
+) -> ApiResult<Json<ApiEnvelope<atlas_query::QueryResult>>> {
+    auth.require_read()?;
+    let scope = scope_from_auth(&auth);
+
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| ApiError::internal("store lock"))?;
 
     let saved = store
-        .load_saved_query(&name)
-        .map_err(internal_error)?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("query no encontrada: {name}"),
-            )
-        })?;
+        .load_saved_query_scoped(&scope, &name)?
+        .ok_or_else(|| ApiError::not_found(format!("query no encontrada: {name}")))?;
 
     let graph = store
-        .load_latest_graph(&target)
-        .map_err(internal_error)?
+        .load_latest_graph_scoped(&scope, &target)?
         .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                format!("graph no encontrado para {target}"),
-            )
+            ApiError::not_found(format!(
+                "graph no encontrado para {target} en este tenant/project"
+            ))
         })?;
 
-    let request = parse_query(&saved.expression, 25)
-        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let request =
+        atlas_query::parse_query(&saved.expression, state.config.pagination.default_limit)
+            .map_err(|err| ApiError::bad_request(err.to_string()))?;
 
-    let result = execute_query(&graph, &request)
-        .map_err(|err| (StatusCode::BAD_REQUEST, err.to_string()))?;
+    let result = atlas_query::execute_query(&graph, &request)
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
 
-    Ok(Json(json!({
-        "ok": true,
-        "saved_query": saved,
-        "result": result
-    })))
-}
+    store.record_audit_event_scoped(
+        &scope,
+        &auth.subject,
+        "query.run_saved",
+        "saved_query",
+        &name,
+        &serde_json::json!({
+            "target": target,
+            "expression": saved.expression,
+            "matches": result.summary.total_matches
+        }),
+    )?;
 
-fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+    Ok(Json(ApiEnvelope { data: result }))
 }

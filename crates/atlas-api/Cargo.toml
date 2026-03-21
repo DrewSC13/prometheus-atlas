@@ -27,11 +27,15 @@ uuid.workspace = true
 
 atlas-config = { path = "../atlas-config" }
 atlas-core = { path = "../atlas-core" }
-atlas-discovery = { path = "../atlas-discovery" }
+atlas-correlation = { path = "../atlas-correlation" }
 atlas-diff = { path = "../atlas-diff" }
+atlas-discovery = { path = "../atlas-discovery" }
 atlas-drift = { path = "../atlas-drift" }
+atlas-episodes = { path = "../atlas-episodes" }
 atlas-graph = { path = "../atlas-graph" }
 atlas-jobs = { path = "../atlas-jobs" }
+atlas-plugins = { path = "../atlas-plugins" }
 atlas-query = { path = "../atlas-query" }
+atlas-report = { path = "../atlas-report" }
 atlas-snapshot = { path = "../atlas-snapshot" }
 atlas-store = { path = "../atlas-store" }

@@ -1,52 +1,83 @@
-use crate::{auth::AuthContext, state::AppState};
+use std::{path::Path, sync::Arc};
+
 use axum::{
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path as AxumPath, State},
     Json,
 };
-use serde_json::json;
-use std::sync::Arc;
 
-type ApiResult<T> = Result<T, (StatusCode, String)>;
+use crate::{
+    auth::{scope_from_auth, AuthContext},
+    error::{ApiError, ApiResult},
+    models::ApiEnvelope,
+    state::AppState,
+};
 
 pub async fn get_report(
     State(state): State<Arc<AppState>>,
-    _auth: AuthContext,
-    Path(target): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let store = state.store.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "store lock poisoned".to_string(),
-        )
-    })?;
+    auth: AuthContext,
+    AxumPath(target): AxumPath<String>,
+) -> ApiResult<Json<ApiEnvelope<atlas_report::ExecutiveReport>>> {
+    auth.require_read()?;
+    let scope = scope_from_auth(&auth);
 
-    let snapshots = store.list_snapshots(&target).map_err(internal_error)?;
-    let history = store.list_history(&target).map_err(internal_error)?;
-    let findings = store
-        .list_current_findings_operational(&target, None, None, None, None)
-        .map_err(internal_error)?;
-    let episodes = store.list_episodes(&target).map_err(internal_error)?;
-    let graphs = store.list_graphs(&target).map_err(internal_error)?;
+    let snapshots_meta = {
+        let store = state
+            .store
+            .lock()
+            .map_err(|_| ApiError::internal("store lock"))?;
+        store.list_snapshots_scoped(&scope, &target)?
+    };
 
-    Ok(Json(json!({
-        "ok": true,
-        "target": target,
-        "summary": {
-            "snapshots": snapshots.len(),
-            "history_runs": history.len(),
-            "current_findings": findings.len(),
-            "episodes": episodes.len(),
-            "graphs": graphs.len()
-        },
-        "latest_snapshot": snapshots.first(),
-        "latest_run": history.first(),
-        "latest_graph": graphs.first(),
-        "current_findings": findings,
-        "episodes": episodes
-    })))
-}
+    if snapshots_meta.is_empty() {
+        return Err(ApiError::not_found(format!(
+            "no hay snapshots persistidos para {target}"
+        )));
+    }
 
-fn internal_error(err: anyhow::Error) -> (StatusCode, String) {
-    (StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+    let mut snapshots = Vec::new();
+    for item in &snapshots_meta {
+        snapshots.push(atlas_snapshot::load_snapshot(Path::new(&item.path))?);
+    }
+    snapshots.sort_by_key(|s| s.timestamp);
+
+    let timeline = if snapshots.len() >= 2 {
+        Some(atlas_drift::build_timeline_report(
+            &target, &snapshots, None,
+        )?)
+    } else {
+        None
+    };
+
+    let episodes = if let Some(timeline) = &timeline {
+        let mut clusters_by_transition = Vec::new();
+        for transition in &timeline.transitions {
+            clusters_by_transition.push(atlas_correlation::correlate_report(&transition.report)?);
+        }
+
+        Some(atlas_episodes::build_episodes_for_timeline(
+            &target,
+            timeline,
+            &clusters_by_transition,
+        )?)
+    } else {
+        None
+    };
+
+    let graph = atlas_graph::build_full_graph(
+        &target,
+        snapshots.last(),
+        timeline.as_ref(),
+        episodes.as_ref(),
+    );
+
+    let report = atlas_report::build_executive_report(
+        &target,
+        &snapshots,
+        timeline.as_ref(),
+        episodes.as_ref(),
+        &graph,
+        false,
+    );
+
+    Ok(Json(ApiEnvelope { data: report }))
 }
