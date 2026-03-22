@@ -2,7 +2,9 @@ use anyhow::{bail, Result};
 use atlas_config::AppConfig;
 use atlas_plugins::default_registry_for;
 use atlas_snapshot::Snapshot;
-use atlas_store::{AtlasStore, StorageScope};
+use atlas_store::{
+    AlertDeliveryRequest, AtlasStore, StorageScope, StoredAlertDelivery, StoredIncident,
+};
 use clap::Parser;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -157,23 +159,23 @@ async fn execute_queue_item(
 ) -> Result<serde_json::Value> {
     config.profile(&item.profile)?;
 
-    let scan_started = std::time::Instant::now();
+    let started = std::time::Instant::now();
     let result = atlas_discovery::scan_target(&item.target).await?;
     let snapshot = atlas_snapshot::Snapshot::new(result);
     let snapshot_dir = PathBuf::from(".snapshots");
     let snapshot_path = atlas_snapshot::save_snapshot(&snapshot, &snapshot_dir)?;
 
     let should_persist = item.persist_artifacts || config.drift.persist_by_default;
-    if should_persist {
-        store.register_snapshot_scoped(scope, &snapshot_path, &snapshot)?;
-    }
-
     let mut transitions = 0usize;
     let mut episodes = 0usize;
     let mut graph_nodes = 0usize;
     let mut graph_edges = 0usize;
+    let mut incidents_seeded = 0usize;
+    let mut alerts_recorded = 0usize;
 
     if should_persist {
+        store.register_snapshot_scoped(scope, &snapshot_path, &snapshot)?;
+
         let bundle = build_analysis_bundle(
             config,
             &item.target,
@@ -211,9 +213,17 @@ async fn execute_queue_item(
         graph_nodes = bundle.graph.node_count;
         graph_edges = bundle.graph.edge_count;
         store.store_graph_scoped(scope, &item.target, &bundle.graph)?;
+
+        let seeded = seed_incidents_from_current_state(config, store, scope, &item.target)?;
+        incidents_seeded = seeded.len();
+
+        for incident in seeded {
+            let deliveries = deliver_incident_alerts(config, store, scope, &incident).await?;
+            alerts_recorded += deliveries.len();
+        }
     }
 
-    let duration_ms = scan_started.elapsed().as_millis();
+    let duration_ms = started.elapsed().as_millis();
     store.record_telemetry_scoped(
         scope,
         "worker-job-run",
@@ -227,7 +237,9 @@ async fn execute_queue_item(
             "transitions": transitions,
             "episodes": episodes,
             "graph_nodes": graph_nodes,
-            "graph_edges": graph_edges
+            "graph_edges": graph_edges,
+            "incidents_seeded": incidents_seeded,
+            "alerts_recorded": alerts_recorded
         }),
     )?;
 
@@ -241,8 +253,214 @@ async fn execute_queue_item(
         "episodes": episodes,
         "graph_nodes": graph_nodes,
         "graph_edges": graph_edges,
+        "incidents_seeded": incidents_seeded,
+        "alerts_recorded": alerts_recorded,
         "duration_ms": duration_ms
     }))
+}
+
+fn seed_incidents_from_current_state(
+    config: &AppConfig,
+    store: &AtlasStore,
+    scope: &StorageScope,
+    target: &str,
+) -> Result<Vec<StoredIncident>> {
+    let mut created = Vec::new();
+
+    let current_findings =
+        store.list_current_findings_operational_scoped(scope, target, None, None, None, None)?;
+
+    for finding in current_findings {
+        let score_match = finding.score >= config.alerts.incident_open_score_threshold;
+        let severity_match = finding.severity.eq_ignore_ascii_case("high");
+
+        if !(score_match || severity_match) {
+            continue;
+        }
+
+        if finding.operational_state.eq_ignore_ascii_case("resolved") {
+            continue;
+        }
+
+        let incident_id = format!("finding:{}", finding.finding_id);
+        let existing = store.get_incident_scoped(scope, &incident_id)?;
+        if existing.is_some() {
+            continue;
+        }
+
+        let incident = StoredIncident {
+            incident_id: incident_id.clone(),
+            target: target.to_string(),
+            source_kind: "finding".to_string(),
+            source_id: finding.finding_id.clone(),
+            title: format!("Incident seed from finding: {}", finding.title),
+            severity: finding.severity.clone(),
+            score: finding.score,
+            state: "open".to_string(),
+            owner: finding.owner.clone(),
+            notes: None,
+            resource: finding.resource.clone(),
+            context_json: serde_json::to_string(&json!({
+                "category": finding.category,
+                "asset_type": finding.asset_type,
+                "criticality": finding.criticality,
+                "description": finding.description
+            }))?,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        store.upsert_incident_scoped(scope, &incident)?;
+        created.push(incident);
+    }
+
+    let episodes = store.list_episodes_scoped(scope, target)?;
+    for episode in episodes {
+        let is_high = episode.severity.eq_ignore_ascii_case("high")
+            || episode.criticality.eq_ignore_ascii_case("critical");
+        if !is_high {
+            continue;
+        }
+
+        let incident_id = format!("episode:{}", episode.episode_id);
+        let existing = store.get_incident_scoped(scope, &incident_id)?;
+        if existing.is_some() {
+            continue;
+        }
+
+        let incident = StoredIncident {
+            incident_id: incident_id.clone(),
+            target: target.to_string(),
+            source_kind: "episode".to_string(),
+            source_id: episode.episode_id.clone(),
+            title: format!("Incident seed from episode: {}", episode.title),
+            severity: episode.severity.clone(),
+            score: episode.score,
+            state: "open".to_string(),
+            owner: None,
+            notes: None,
+            resource: target.to_string(),
+            context_json: serde_json::to_string(&json!({
+                "criticality": episode.criticality,
+                "summary": episode.summary,
+                "resource_count": episode.resource_count
+            }))?,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        store.upsert_incident_scoped(scope, &incident)?;
+        created.push(incident);
+    }
+
+    Ok(created)
+}
+
+async fn deliver_incident_alerts(
+    config: &AppConfig,
+    store: &AtlasStore,
+    scope: &StorageScope,
+    incident: &StoredIncident,
+) -> Result<Vec<StoredAlertDelivery>> {
+    if !config.alerts.enabled {
+        return Ok(Vec::new());
+    }
+
+    let payload = json!({
+        "event_type": "incident.opened",
+        "incident_id": incident.incident_id,
+        "target": incident.target,
+        "title": incident.title,
+        "severity": incident.severity,
+        "score": incident.score,
+        "resource": incident.resource,
+        "source_kind": incident.source_kind,
+        "source_id": incident.source_id
+    });
+
+    let client = reqwest::Client::new();
+    let mut deliveries = Vec::new();
+
+    for url in &config.alerts.webhook_urls {
+        let response = client.post(url).json(&payload).send().await;
+        let (status, response_body) = match response {
+            Ok(resp) => {
+                let code = resp.status();
+                let body = resp.text().await.ok();
+                if code.is_success() {
+                    ("delivered".to_string(), body)
+                } else {
+                    ("failed".to_string(), body)
+                }
+            }
+            Err(err) => ("failed".to_string(), Some(err.to_string())),
+        };
+
+        deliveries.push(store.record_alert_delivery_scoped(
+            scope,
+            &AlertDeliveryRequest {
+                channel: "webhook".to_string(),
+                destination: url.clone(),
+                event_type: "incident.opened".to_string(),
+                status,
+                payload: payload.clone(),
+                response_body,
+            },
+        )?);
+    }
+
+    for url in &config.alerts.slack_webhooks {
+        let slack_payload = json!({
+            "text": format!(
+                "[{}] {} | target={} | score={}",
+                incident.severity, incident.title, incident.target, incident.score
+            )
+        });
+
+        let response = client.post(url).json(&slack_payload).send().await;
+        let (status, response_body) = match response {
+            Ok(resp) => {
+                let code = resp.status();
+                let body = resp.text().await.ok();
+                if code.is_success() {
+                    ("delivered".to_string(), body)
+                } else {
+                    ("failed".to_string(), body)
+                }
+            }
+            Err(err) => ("failed".to_string(), Some(err.to_string())),
+        };
+
+        deliveries.push(store.record_alert_delivery_scoped(
+            scope,
+            &AlertDeliveryRequest {
+                channel: "slack".to_string(),
+                destination: url.clone(),
+                event_type: "incident.opened".to_string(),
+                status,
+                payload: slack_payload.clone(),
+                response_body,
+            },
+        )?);
+    }
+
+    for recipient in &config.alerts.email_recipients {
+        deliveries.push(store.record_alert_delivery_scoped(
+            scope,
+            &AlertDeliveryRequest {
+                channel: "email".to_string(),
+                destination: recipient.clone(),
+                event_type: "incident.opened".to_string(),
+                status: "pending_external".to_string(),
+                payload: payload.clone(),
+                response_body: Some(
+                    "email transport no implementado; delivery registrada".to_string(),
+                ),
+            },
+        )?);
+    }
+
+    Ok(deliveries)
 }
 
 fn build_analysis_bundle(

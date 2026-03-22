@@ -18,6 +18,7 @@ pub struct AppConfig {
     pub saas: SaasConfig,
     pub pagination: PaginationConfig,
     pub alerts: AlertConfig,
+    pub scheduler: SchedulerConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +217,10 @@ impl Default for PaginationConfig {
 pub struct AlertConfig {
     pub enabled: bool,
     pub default_severity_threshold: String,
+    pub incident_open_score_threshold: u32,
+    pub webhook_urls: Vec<String>,
+    pub slack_webhooks: Vec<String>,
+    pub email_recipients: Vec<String>,
 }
 
 impl Default for AlertConfig {
@@ -223,6 +228,26 @@ impl Default for AlertConfig {
         Self {
             enabled: true,
             default_severity_threshold: "medium".to_string(),
+            incident_open_score_threshold: 70,
+            webhook_urls: Vec::new(),
+            slack_webhooks: Vec::new(),
+            email_recipients: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SchedulerConfig {
+    pub enabled: bool,
+    pub poll_seconds: u64,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_seconds: 10,
         }
     }
 }
@@ -288,6 +313,10 @@ impl AppConfig {
             bail!("saas.default_project_id no puede estar vacío");
         }
 
+        if self.scheduler.poll_seconds == 0 {
+            bail!("scheduler.poll_seconds debe ser > 0");
+        }
+
         Ok(())
     }
 
@@ -325,6 +354,7 @@ impl Default for AppConfig {
             saas: SaasConfig::default(),
             pagination: PaginationConfig::default(),
             alerts: AlertConfig::default(),
+            scheduler: SchedulerConfig::default(),
         }
     }
 }

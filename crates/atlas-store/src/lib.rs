@@ -197,6 +197,63 @@ pub struct StoredCurrentFinding {
     pub operational_updated_at: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredAssetOwner {
+    pub resource: String,
+    pub owner: String,
+    pub team: Option<String>,
+    pub business_service: Option<String>,
+    pub criticality: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredIncident {
+    pub incident_id: String,
+    pub target: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub title: String,
+    pub severity: String,
+    pub score: u32,
+    pub state: String,
+    pub owner: Option<String>,
+    pub notes: Option<String>,
+    pub resource: String,
+    pub context_json: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredAlertDelivery {
+    pub delivery_id: String,
+    pub channel: String,
+    pub destination: String,
+    pub event_type: String,
+    pub status: String,
+    pub payload_json: String,
+    pub response_body: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AlertDeliveryRequest {
+    pub channel: String,
+    pub destination: String,
+    pub event_type: String,
+    pub status: String,
+    pub payload: Value,
+    pub response_body: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopedJob {
+    pub scope: StorageScope,
+    pub job: AtlasJob,
+}
+
 #[derive(Debug, Clone)]
 struct TableColumn {
     name: String,
@@ -477,6 +534,53 @@ impl AtlasStore {
                 error_message TEXT,
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS asset_owners (
+                tenant_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                resource TEXT NOT NULL,
+                owner TEXT NOT NULL,
+                team TEXT,
+                business_service TEXT,
+                criticality TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, resource)
+            );
+
+            CREATE TABLE IF NOT EXISTS incidents (
+                tenant_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                incident_id TEXT NOT NULL,
+                target TEXT NOT NULL,
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                severity TEXT NOT NULL,
+                score INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                owner TEXT,
+                notes TEXT,
+                resource TEXT NOT NULL,
+                context_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, incident_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS alert_deliveries (
+                tenant_id TEXT NOT NULL,
+                project_id TEXT NOT NULL,
+                delivery_id TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                destination TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                response_body TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, project_id, delivery_id)
+            );
             "#,
         )?;
 
@@ -515,6 +619,15 @@ impl AtlasStore {
 
             CREATE INDEX IF NOT EXISTS idx_job_executions_queue
             ON job_executions (queue_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_asset_owners_scope
+            ON asset_owners (tenant_id, project_id, resource ASC);
+
+            CREATE INDEX IF NOT EXISTS idx_incidents_scope
+            ON incidents (tenant_id, project_id, state, score DESC, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_alert_deliveries_scope
+            ON alert_deliveries (tenant_id, project_id, created_at DESC);
             "#,
         )?;
         Ok(())
@@ -1316,6 +1429,12 @@ impl AtlasStore {
                 .or_insert(finding);
         }
 
+        let asset_owners = self.list_asset_owners_scoped(scope, None)?;
+        let asset_owner_map = asset_owners
+            .into_iter()
+            .map(|item| (item.resource, item.owner))
+            .collect::<BTreeMap<_, _>>();
+
         let mut items = Vec::new();
 
         for (_, finding) in latest_by_finding {
@@ -1324,7 +1443,10 @@ impl AtlasStore {
                 .as_ref()
                 .map(|t| t.operational_state.clone())
                 .unwrap_or_else(|| "open".to_string());
-            let op_owner = triage.as_ref().and_then(|t| t.owner.clone());
+            let op_owner = triage
+                .as_ref()
+                .and_then(|t| t.owner.clone())
+                .or_else(|| asset_owner_map.get(&finding.resource).cloned());
             let op_notes = triage.as_ref().and_then(|t| t.notes.clone());
             let op_updated_at = triage.as_ref().map(|t| t.updated_at.clone());
 
@@ -1746,6 +1868,53 @@ impl AtlasStore {
         Ok(jobs)
     }
 
+    pub fn list_all_jobs_with_scope(&self) -> Result<Vec<ScopedJob>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                tenant_id,
+                project_id,
+                job_id,
+                target,
+                profile,
+                interval_seconds,
+                enabled,
+                policy_path,
+                last_run_at,
+                created_at
+            FROM jobs
+            ORDER BY created_at DESC
+            "#,
+        )?;
+
+        let rows = stmt.query_map([], |row| {
+            let enabled_value = row_bool(row, 6)?;
+            let policy_path = row_optional_string(row, 7)?;
+            let last_run_at = row_optional_string(row, 8)?;
+            let created_at = row_string(row, 9)?;
+
+            Ok(ScopedJob {
+                scope: StorageScope::new(row_string(row, 0)?, row_string(row, 1)?),
+                job: AtlasJob {
+                    job_id: row_string(row, 2)?,
+                    target: row_string(row, 3)?,
+                    profile: row_string(row, 4)?,
+                    interval_seconds: row_u64(row, 5)? as u64,
+                    enabled: enabled_value,
+                    policy_path,
+                    last_run_at: parse_optional_datetime(last_run_at),
+                    created_at: parse_datetime(created_at)?,
+                },
+            })
+        })?;
+
+        let mut jobs = Vec::new();
+        for row in rows {
+            jobs.push(row?);
+        }
+        Ok(jobs)
+    }
+
     pub fn load_job_scoped(&self, scope: &StorageScope, job_id: &str) -> Result<Option<AtlasJob>> {
         self.list_jobs_scoped(scope)
             .map(|items| items.into_iter().find(|item| item.job_id == job_id))
@@ -1885,7 +2054,6 @@ impl AtlasStore {
         )?;
 
         self.append_job_execution_from_queue(&item, None, None, None)?;
-
         Ok(item)
     }
 
@@ -2012,6 +2180,32 @@ impl AtlasStore {
             .optional()?;
 
         Ok(item)
+    }
+
+    pub fn job_has_active_queue_item_scoped(
+        &self,
+        scope: &StorageScope,
+        job_id: &str,
+    ) -> Result<bool> {
+        let found = self.conn.query_row(
+            r#"
+            SELECT 1
+            FROM job_queue
+            WHERE tenant_id = ?1
+              AND project_id = ?2
+              AND job_id = ?3
+              AND status IN ('pending', 'claimed', 'running')
+            LIMIT 1
+            "#,
+            params![scope.tenant_id, scope.project_id, job_id],
+            |_row| Ok(true),
+        );
+
+        match found {
+            Ok(value) => Ok(value),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+            Err(err) => Err(err.into()),
+        }
     }
 
     pub fn claim_next_job_queue_item(
@@ -2252,6 +2446,81 @@ impl AtlasStore {
             ],
         )?;
         Ok(())
+    }
+
+    pub fn list_job_executions_scoped(
+        &self,
+        scope: &StorageScope,
+        job_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<JobExecutionRecord>> {
+        let mut items = Vec::new();
+
+        if let Some(job_id) = job_id {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT
+                    execution_id,
+                    queue_id,
+                    tenant_id,
+                    project_id,
+                    job_id,
+                    worker_id,
+                    status,
+                    started_at,
+                    finished_at,
+                    result_json,
+                    error_message,
+                    created_at
+                FROM job_executions
+                WHERE tenant_id = ?1 AND project_id = ?2 AND job_id = ?3
+                ORDER BY created_at DESC
+                LIMIT ?4
+                "#,
+            )?;
+
+            let rows = stmt.query_map(
+                params![scope.tenant_id, scope.project_id, job_id, limit as i64],
+                map_job_execution_record,
+            )?;
+
+            for row in rows {
+                items.push(row?);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT
+                    execution_id,
+                    queue_id,
+                    tenant_id,
+                    project_id,
+                    job_id,
+                    worker_id,
+                    status,
+                    started_at,
+                    finished_at,
+                    result_json,
+                    error_message,
+                    created_at
+                FROM job_executions
+                WHERE tenant_id = ?1 AND project_id = ?2
+                ORDER BY created_at DESC
+                LIMIT ?3
+                "#,
+            )?;
+
+            let rows = stmt.query_map(
+                params![scope.tenant_id, scope.project_id, limit as i64],
+                map_job_execution_record,
+            )?;
+
+            for row in rows {
+                items.push(row?);
+            }
+        }
+
+        Ok(items)
     }
 
     pub fn baseline_approve(&self, resource: &str) -> Result<()> {
@@ -2871,6 +3140,498 @@ impl AtlasStore {
         Ok(())
     }
 
+    pub fn upsert_asset_owner_scoped(
+        &self,
+        scope: &StorageScope,
+        resource: &str,
+        owner: &str,
+        team: Option<&str>,
+        business_service: Option<&str>,
+        criticality: Option<&str>,
+    ) -> Result<StoredAssetOwner> {
+        let now = Utc::now().to_rfc3339();
+
+        let existing_created_at = self
+            .conn
+            .query_row(
+                r#"
+                SELECT created_at
+                FROM asset_owners
+                WHERE tenant_id = ?1 AND project_id = ?2 AND resource = ?3
+                "#,
+                params![scope.tenant_id, scope.project_id, resource],
+                |row| row_string(row, 0),
+            )
+            .optional()?;
+
+        let created_at = existing_created_at.unwrap_or_else(|| now.clone());
+
+        self.conn.execute(
+            r#"
+            INSERT INTO asset_owners (
+                tenant_id,
+                project_id,
+                resource,
+                owner,
+                team,
+                business_service,
+                criticality,
+                created_at,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(tenant_id, project_id, resource) DO UPDATE SET
+                owner = excluded.owner,
+                team = excluded.team,
+                business_service = excluded.business_service,
+                criticality = excluded.criticality,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                scope.tenant_id,
+                scope.project_id,
+                resource,
+                owner,
+                team,
+                business_service,
+                criticality,
+                created_at,
+                now
+            ],
+        )?;
+
+        Ok(StoredAssetOwner {
+            resource: resource.to_string(),
+            owner: owner.to_string(),
+            team: team.map(str::to_string),
+            business_service: business_service.map(str::to_string),
+            criticality: criticality.map(str::to_string),
+            created_at,
+            updated_at: now,
+        })
+    }
+
+    pub fn list_asset_owners_scoped(
+        &self,
+        scope: &StorageScope,
+        resource: Option<&str>,
+    ) -> Result<Vec<StoredAssetOwner>> {
+        let mut items = Vec::new();
+
+        if let Some(resource) = resource {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT resource, owner, team, business_service, criticality, created_at, updated_at
+                FROM asset_owners
+                WHERE tenant_id = ?1 AND project_id = ?2 AND resource = ?3
+                ORDER BY resource ASC
+                "#,
+            )?;
+
+            let rows = stmt.query_map(
+                params![scope.tenant_id, scope.project_id, resource],
+                |row| {
+                    Ok(StoredAssetOwner {
+                        resource: row_string(row, 0)?,
+                        owner: row_string(row, 1)?,
+                        team: row_optional_string(row, 2)?,
+                        business_service: row_optional_string(row, 3)?,
+                        criticality: row_optional_string(row, 4)?,
+                        created_at: row_string(row, 5)?,
+                        updated_at: row_string(row, 6)?,
+                    })
+                },
+            )?;
+
+            for row in rows {
+                items.push(row?);
+            }
+        } else {
+            let mut stmt = self.conn.prepare(
+                r#"
+                SELECT resource, owner, team, business_service, criticality, created_at, updated_at
+                FROM asset_owners
+                WHERE tenant_id = ?1 AND project_id = ?2
+                ORDER BY resource ASC
+                "#,
+            )?;
+
+            let rows = stmt.query_map(params![scope.tenant_id, scope.project_id], |row| {
+                Ok(StoredAssetOwner {
+                    resource: row_string(row, 0)?,
+                    owner: row_string(row, 1)?,
+                    team: row_optional_string(row, 2)?,
+                    business_service: row_optional_string(row, 3)?,
+                    criticality: row_optional_string(row, 4)?,
+                    created_at: row_string(row, 5)?,
+                    updated_at: row_string(row, 6)?,
+                })
+            })?;
+
+            for row in rows {
+                items.push(row?);
+            }
+        }
+
+        Ok(items)
+    }
+
+    pub fn upsert_incident_scoped(
+        &self,
+        scope: &StorageScope,
+        incident: &StoredIncident,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            INSERT INTO incidents (
+                tenant_id,
+                project_id,
+                incident_id,
+                target,
+                source_kind,
+                source_id,
+                title,
+                severity,
+                score,
+                state,
+                owner,
+                notes,
+                resource,
+                context_json,
+                created_at,
+                updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+            ON CONFLICT(tenant_id, project_id, incident_id) DO UPDATE SET
+                target = excluded.target,
+                source_kind = excluded.source_kind,
+                source_id = excluded.source_id,
+                title = excluded.title,
+                severity = excluded.severity,
+                score = excluded.score,
+                state = excluded.state,
+                owner = excluded.owner,
+                notes = excluded.notes,
+                resource = excluded.resource,
+                context_json = excluded.context_json,
+                updated_at = excluded.updated_at
+            "#,
+            params![
+                scope.tenant_id,
+                scope.project_id,
+                incident.incident_id,
+                incident.target,
+                incident.source_kind,
+                incident.source_id,
+                incident.title,
+                incident.severity,
+                incident.score,
+                incident.state,
+                incident.owner,
+                incident.notes,
+                incident.resource,
+                incident.context_json,
+                incident.created_at,
+                incident.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_incident_scoped(
+        &self,
+        scope: &StorageScope,
+        incident_id: &str,
+    ) -> Result<Option<StoredIncident>> {
+        let result = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    incident_id,
+                    target,
+                    source_kind,
+                    source_id,
+                    title,
+                    severity,
+                    score,
+                    state,
+                    owner,
+                    notes,
+                    resource,
+                    context_json,
+                    created_at,
+                    updated_at
+                FROM incidents
+                WHERE tenant_id = ?1 AND project_id = ?2 AND incident_id = ?3
+                "#,
+                params![scope.tenant_id, scope.project_id, incident_id],
+                |row| {
+                    Ok(StoredIncident {
+                        incident_id: row_string(row, 0)?,
+                        target: row_string(row, 1)?,
+                        source_kind: row_string(row, 2)?,
+                        source_id: row_string(row, 3)?,
+                        title: row_string(row, 4)?,
+                        severity: row_string(row, 5)?,
+                        score: row_u64(row, 6)? as u32,
+                        state: row_string(row, 7)?,
+                        owner: row_optional_string(row, 8)?,
+                        notes: row_optional_string(row, 9)?,
+                        resource: row_string(row, 10)?,
+                        context_json: row_string(row, 11)?,
+                        created_at: row_string(row, 12)?,
+                        updated_at: row_string(row, 13)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        Ok(result)
+    }
+
+    pub fn list_incidents_scoped(
+        &self,
+        scope: &StorageScope,
+        state: Option<&str>,
+        owner: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<StoredIncident>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                incident_id,
+                target,
+                source_kind,
+                source_id,
+                title,
+                severity,
+                score,
+                state,
+                owner,
+                notes,
+                resource,
+                context_json,
+                created_at,
+                updated_at
+            FROM incidents
+            WHERE tenant_id = ?1 AND project_id = ?2
+            ORDER BY score DESC, updated_at DESC
+            LIMIT ?3
+            "#,
+        )?;
+
+        let rows = stmt.query_map(
+            params![scope.tenant_id, scope.project_id, limit as i64],
+            |row| {
+                Ok(StoredIncident {
+                    incident_id: row_string(row, 0)?,
+                    target: row_string(row, 1)?,
+                    source_kind: row_string(row, 2)?,
+                    source_id: row_string(row, 3)?,
+                    title: row_string(row, 4)?,
+                    severity: row_string(row, 5)?,
+                    score: row_u64(row, 6)? as u32,
+                    state: row_string(row, 7)?,
+                    owner: row_optional_string(row, 8)?,
+                    notes: row_optional_string(row, 9)?,
+                    resource: row_string(row, 10)?,
+                    context_json: row_string(row, 11)?,
+                    created_at: row_string(row, 12)?,
+                    updated_at: row_string(row, 13)?,
+                })
+            },
+        )?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+
+        if let Some(state_filter) = state {
+            items.retain(|i| i.state.eq_ignore_ascii_case(state_filter));
+        }
+
+        if let Some(owner_filter) = owner {
+            items.retain(|i| {
+                i.owner
+                    .as_deref()
+                    .map(|value| value.eq_ignore_ascii_case(owner_filter))
+                    .unwrap_or(false)
+            });
+        }
+
+        Ok(items)
+    }
+
+    pub fn set_incident_state_scoped(
+        &self,
+        scope: &StorageScope,
+        incident_id: &str,
+        incident_state: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE incidents
+            SET state = ?1, updated_at = ?2
+            WHERE tenant_id = ?3 AND project_id = ?4 AND incident_id = ?5
+            "#,
+            params![
+                incident_state,
+                Utc::now().to_rfc3339(),
+                scope.tenant_id,
+                scope.project_id,
+                incident_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn assign_incident_owner_scoped(
+        &self,
+        scope: &StorageScope,
+        incident_id: &str,
+        owner: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE incidents
+            SET owner = ?1, updated_at = ?2
+            WHERE tenant_id = ?3 AND project_id = ?4 AND incident_id = ?5
+            "#,
+            params![
+                owner,
+                Utc::now().to_rfc3339(),
+                scope.tenant_id,
+                scope.project_id,
+                incident_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_incident_note_scoped(
+        &self,
+        scope: &StorageScope,
+        incident_id: &str,
+        notes: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            r#"
+            UPDATE incidents
+            SET notes = ?1, updated_at = ?2
+            WHERE tenant_id = ?3 AND project_id = ?4 AND incident_id = ?5
+            "#,
+            params![
+                notes,
+                Utc::now().to_rfc3339(),
+                scope.tenant_id,
+                scope.project_id,
+                incident_id
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn record_alert_delivery_scoped(
+        &self,
+        scope: &StorageScope,
+        request: &AlertDeliveryRequest,
+    ) -> Result<StoredAlertDelivery> {
+        let delivery_id = format!(
+            "{}:{}:{}",
+            request.channel,
+            request.destination,
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let created_at = Utc::now().to_rfc3339();
+        let payload_json = serde_json::to_string(&request.payload)?;
+
+        self.conn.execute(
+            r#"
+            INSERT INTO alert_deliveries (
+                tenant_id,
+                project_id,
+                delivery_id,
+                channel,
+                destination,
+                event_type,
+                status,
+                payload_json,
+                response_body,
+                created_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                scope.tenant_id,
+                scope.project_id,
+                delivery_id,
+                request.channel,
+                request.destination,
+                request.event_type,
+                request.status,
+                payload_json,
+                request.response_body,
+                created_at
+            ],
+        )?;
+
+        Ok(StoredAlertDelivery {
+            delivery_id,
+            channel: request.channel.clone(),
+            destination: request.destination.clone(),
+            event_type: request.event_type.clone(),
+            status: request.status.clone(),
+            payload_json,
+            response_body: request.response_body.clone(),
+            created_at,
+        })
+    }
+
+    pub fn list_alert_deliveries_scoped(
+        &self,
+        scope: &StorageScope,
+        limit: usize,
+    ) -> Result<Vec<StoredAlertDelivery>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT
+                delivery_id,
+                channel,
+                destination,
+                event_type,
+                status,
+                payload_json,
+                response_body,
+                created_at
+            FROM alert_deliveries
+            WHERE tenant_id = ?1 AND project_id = ?2
+            ORDER BY created_at DESC
+            LIMIT ?3
+            "#,
+        )?;
+
+        let rows = stmt.query_map(
+            params![scope.tenant_id, scope.project_id, limit as i64],
+            |row| {
+                Ok(StoredAlertDelivery {
+                    delivery_id: row_string(row, 0)?,
+                    channel: row_string(row, 1)?,
+                    destination: row_string(row, 2)?,
+                    event_type: row_string(row, 3)?,
+                    status: row_string(row, 4)?,
+                    payload_json: row_string(row, 5)?,
+                    response_body: row_optional_string(row, 6)?,
+                    created_at: row_string(row, 7)?,
+                })
+            },
+        )?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            items.push(row?);
+        }
+        Ok(items)
+    }
+
     fn repair_legacy_tables_if_needed(&self) -> Result<()> {
         for table in [
             "snapshots",
@@ -3032,6 +3793,26 @@ fn map_job_queue_item(row: &Row<'_>) -> rusqlite::Result<JobQueueItem> {
         created_at: parse_datetime(row_string(row, 17)?)?,
         updated_at: parse_datetime(row_string(row, 18)?)?,
         last_error: row_optional_string(row, 19)?,
+    })
+}
+
+fn map_job_execution_record(row: &Row<'_>) -> rusqlite::Result<JobExecutionRecord> {
+    let status =
+        JobQueueStatus::from_str(&row_string(row, 6)?).map_err(|e| to_sql_err(anyhow!(e)))?;
+
+    Ok(JobExecutionRecord {
+        execution_id: row_string(row, 0)?,
+        queue_id: row_string(row, 1)?,
+        tenant_id: row_string(row, 2)?,
+        project_id: row_string(row, 3)?,
+        job_id: row_string(row, 4)?,
+        worker_id: row_optional_string(row, 5)?,
+        status,
+        started_at: parse_optional_datetime(row_optional_string(row, 7)?),
+        finished_at: parse_optional_datetime(row_optional_string(row, 8)?),
+        result_json: row_optional_string(row, 9)?,
+        error_message: row_optional_string(row, 10)?,
+        created_at: parse_datetime(row_string(row, 11)?)?,
     })
 }
 
@@ -3393,5 +4174,60 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(done.status, JobQueueStatus::Succeeded);
+    }
+
+    #[test]
+    fn stores_incident_and_alert_delivery() {
+        let db_path = std::env::temp_dir().join(format!(
+            "atlas-store-incident-alert-test-{}.db",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+
+        let store = AtlasStore::open(&db_path).unwrap();
+        store.initialize().unwrap();
+
+        let scope = StorageScope::new("tenant-a", "project-x");
+
+        let incident = StoredIncident {
+            incident_id: "incident-1".to_string(),
+            target: "example.com".to_string(),
+            source_kind: "finding".to_string(),
+            source_id: "f-1".to_string(),
+            title: "Incident seed".to_string(),
+            severity: "HIGH".to_string(),
+            score: 90,
+            state: "open".to_string(),
+            owner: Some("claudio".to_string()),
+            notes: None,
+            resource: "admin.example.com".to_string(),
+            context_json: "{}".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+        };
+
+        store.upsert_incident_scoped(&scope, &incident).unwrap();
+        let loaded = store
+            .get_incident_scoped(&scope, "incident-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.incident_id, "incident-1");
+
+        let delivery = store
+            .record_alert_delivery_scoped(
+                &scope,
+                &AlertDeliveryRequest {
+                    channel: "webhook".to_string(),
+                    destination: "https://example.test/webhook".to_string(),
+                    event_type: "incident.opened".to_string(),
+                    status: "delivered".to_string(),
+                    payload: serde_json::json!({"ok": true}),
+                    response_body: Some("accepted".to_string()),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(delivery.channel, "webhook");
+        let deliveries = store.list_alert_deliveries_scoped(&scope, 10).unwrap();
+        assert_eq!(deliveries.len(), 1);
     }
 }

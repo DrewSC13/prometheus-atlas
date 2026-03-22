@@ -46,29 +46,20 @@ impl AtlasJob {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum JobTrigger {
     Manual,
     Scheduled,
-    Replay,
     Api,
-}
-
-impl JobTrigger {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Manual => "manual",
-            Self::Scheduled => "scheduled",
-            Self::Replay => "replay",
-            Self::Api => "api",
-        }
-    }
 }
 
 impl std::fmt::Display for JobTrigger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
+        match self {
+            Self::Manual => write!(f, "manual"),
+            Self::Scheduled => write!(f, "scheduled"),
+            Self::Api => write!(f, "api"),
+        }
     }
 }
 
@@ -132,23 +123,28 @@ impl JobDispatchRequest {
         }
     }
 
-    pub fn requested_by(mut self, subject: impl Into<String>) -> Self {
-        self.requested_by = Some(subject.into());
+    pub fn requested_by(mut self, requested_by: impl Into<String>) -> Self {
+        self.requested_by = Some(requested_by.into());
         self
     }
 
-    pub fn persist_artifacts(mut self, persist: bool) -> Self {
-        self.persist_artifacts = persist;
+    pub fn persist_artifacts(mut self, persist_artifacts: bool) -> Self {
+        self.persist_artifacts = persist_artifacts;
         self
     }
 
-    pub fn available_at(mut self, when: DateTime<Utc>) -> Self {
-        self.available_at = Some(when);
+    pub fn max_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_attempts = max_attempts;
         self
     }
 
-    pub fn max_attempts(mut self, attempts: u32) -> Self {
-        self.max_attempts = attempts.max(1);
+    pub fn with_policy_path(mut self, policy_path: Option<String>) -> Self {
+        self.policy_path = policy_path;
+        self
+    }
+
+    pub fn available_at(mut self, available_at: DateTime<Utc>) -> Self {
+        self.available_at = Some(available_at);
         self
     }
 }
@@ -170,16 +166,47 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_request_can_be_built_from_job() {
-        let job = AtlasJob::new("example.com", "standard", 3600, None, true);
-        let req =
+    fn dispatch_request_builder_sets_policy_path() {
+        let request = JobDispatchRequest::new(
+            "tenant-a",
+            "project-x",
+            "job-1",
+            "example.com",
+            "standard",
+            JobTrigger::Scheduled,
+        )
+        .requested_by("scheduler")
+        .persist_artifacts(true)
+        .with_policy_path(Some("/tmp/policy.json".to_string()));
+
+        assert_eq!(request.policy_path.as_deref(), Some("/tmp/policy.json"));
+        assert!(request.persist_artifacts);
+        assert_eq!(request.requested_by.as_deref(), Some("scheduler"));
+    }
+
+    #[test]
+    fn dispatch_request_from_job_copies_job_data() {
+        let job = AtlasJob {
+            job_id: "job-123".to_string(),
+            target: "example.com".to_string(),
+            profile: "standard".to_string(),
+            interval_seconds: 3600,
+            enabled: true,
+            policy_path: Some("/tmp/policy.json".to_string()),
+            last_run_at: None,
+            created_at: Utc::now(),
+        };
+
+        let request =
             JobDispatchRequest::from_job("tenant-a", "project-x", &job, JobTrigger::Scheduled);
 
-        assert_eq!(req.tenant_id, "tenant-a");
-        assert_eq!(req.project_id, "project-x");
-        assert_eq!(req.job_id, job.job_id);
-        assert_eq!(req.target, "example.com");
-        assert_eq!(req.profile, "standard");
-        assert_eq!(req.trigger, JobTrigger::Scheduled);
+        assert_eq!(request.tenant_id, "tenant-a");
+        assert_eq!(request.project_id, "project-x");
+        assert_eq!(request.job_id, "job-123");
+        assert_eq!(request.target, "example.com");
+        assert_eq!(request.profile, "standard");
+        assert_eq!(request.policy_path.as_deref(), Some("/tmp/policy.json"));
+        assert_eq!(request.trigger, JobTrigger::Scheduled);
+        assert!(request.available_at.is_none());
     }
 }

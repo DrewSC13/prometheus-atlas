@@ -1,8 +1,8 @@
 use atlas_jobs::AtlasJob;
-use atlas_queue::JobQueueItem;
+use atlas_queue::{JobExecutionRecord, JobQueueItem};
 use atlas_store::{
-    StoredAuditEvent, StoredCurrentFinding, StoredFinding, StoredSavedQuery, StoredSnapshot,
-    StoredTelemetryEvent,
+    StoredAlertDelivery, StoredAssetOwner, StoredAuditEvent, StoredCurrentFinding, StoredFinding,
+    StoredIncident, StoredSavedQuery, StoredSnapshot, StoredTelemetryEvent,
 };
 use atlas_tenancy::{AtlasUser, Membership, Organization, Workspace};
 use serde::{Deserialize, Serialize};
@@ -63,6 +63,22 @@ pub struct FindingPatchRequest {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct IncidentPatchRequest {
+    pub state: Option<String>,
+    pub owner: Option<String>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AssetOwnerUpsertRequest {
+    pub resource: String,
+    pub owner: String,
+    pub team: Option<String>,
+    pub business_service: Option<String>,
+    pub criticality: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct QueryRequestBody {
     pub target: String,
     pub expression: String,
@@ -99,19 +115,23 @@ pub struct BootstrapTokenRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateOrganizationRequest {
+    pub organization_id: Option<String>,
     pub name: String,
     pub slug: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateWorkspaceRequest {
+    pub workspace_id: Option<String>,
+    pub organization_id: String,
     pub name: String,
     pub slug: String,
-    pub environment: Option<String>,
+    pub environment: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct UpsertUserRequest {
+pub struct CreateUserRequest {
+    pub user_id: Option<String>,
     pub subject: String,
     pub email: Option<String>,
     pub display_name: Option<String>,
@@ -119,6 +139,9 @@ pub struct UpsertUserRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateMembershipRequest {
+    pub membership_id: Option<String>,
+    pub organization_id: String,
+    pub workspace_id: String,
     pub user_id: String,
     pub role: String,
 }
@@ -150,13 +173,16 @@ pub struct HealthResponse {
 pub type FindingsResponse = PagedEnvelope<StoredCurrentFinding>;
 pub type JobsResponse = PagedEnvelope<AtlasJob>;
 pub type JobQueueResponse = PagedEnvelope<JobQueueItem>;
+pub type JobExecutionsResponse = PagedEnvelope<JobExecutionRecord>;
 pub type SnapshotsResponse = PagedEnvelope<StoredSnapshot>;
 pub type RawFindingsResponse = PagedEnvelope<StoredFinding>;
 pub type AuditResponse = PagedEnvelope<StoredAuditEvent>;
 pub type QueriesResponse = PagedEnvelope<StoredSavedQuery>;
 pub type TelemetryResponse = PagedEnvelope<StoredTelemetryEvent>;
-
 pub type OrganizationsResponse = PagedEnvelope<Organization>;
 pub type WorkspacesResponse = PagedEnvelope<Workspace>;
 pub type UsersResponse = PagedEnvelope<AtlasUser>;
 pub type MembershipsResponse = PagedEnvelope<Membership>;
+pub type AssetOwnersResponse = PagedEnvelope<StoredAssetOwner>;
+pub type IncidentsResponse = PagedEnvelope<StoredIncident>;
+pub type AlertDeliveriesResponse = PagedEnvelope<StoredAlertDelivery>;

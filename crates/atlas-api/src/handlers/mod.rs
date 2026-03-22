@@ -1,9 +1,14 @@
 pub mod admin;
+pub mod alerts;
+pub mod control_plane;
 pub mod drift;
+pub mod executions;
 pub mod findings;
 pub mod graphs;
 pub mod health;
+pub mod incidents;
 pub mod jobs;
+pub mod ownership;
 pub mod queries;
 pub mod query;
 pub mod reports;
