@@ -1,0 +1,32 @@
+[package]
+name = "atlas-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "atlas-worker"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+
+atlas-config = { path = "../../crates/atlas-config" }
+atlas-correlation = { path = "../../crates/atlas-correlation" }
+atlas-discovery = { path = "../../crates/atlas-discovery" }
+atlas-drift = { path = "../../crates/atlas-drift" }
+atlas-episodes = { path = "../../crates/atlas-episodes" }
+atlas-graph = { path = "../../crates/atlas-graph" }
+atlas-plugins = { path = "../../crates/atlas-plugins" }
+atlas-snapshot = { path = "../../crates/atlas-snapshot" }
+atlas-store = { path = "../../crates/atlas-store" }
+atlas-queue = { path = "../../crates/atlas-queue" }

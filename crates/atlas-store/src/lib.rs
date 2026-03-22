@@ -512,6 +512,9 @@ impl AtlasStore {
 
             CREATE INDEX IF NOT EXISTS idx_audit_scope
             ON audit_events (tenant_id, project_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_job_executions_queue
+            ON job_executions (queue_id, created_at DESC);
             "#,
         )?;
         Ok(())
@@ -1743,6 +1746,11 @@ impl AtlasStore {
         Ok(jobs)
     }
 
+    pub fn load_job_scoped(&self, scope: &StorageScope, job_id: &str) -> Result<Option<AtlasJob>> {
+        self.list_jobs_scoped(scope)
+            .map(|items| items.into_iter().find(|item| item.job_id == job_id))
+    }
+
     pub fn insert_job(&self, job: &AtlasJob) -> Result<()> {
         self.insert_job_scoped(&StorageScope::global(), job)
     }
@@ -1876,8 +1884,7 @@ impl AtlasStore {
             ],
         )?;
 
-        let execution = JobExecutionRecord::from_queue(&item);
-        self.upsert_job_execution(&execution)?;
+        self.append_job_execution_from_queue(&item, None, None, None)?;
 
         Ok(item)
     }
@@ -1970,10 +1977,251 @@ impl AtlasStore {
         Ok(item)
     }
 
-    fn upsert_job_execution(&self, execution: &JobExecutionRecord) -> Result<()> {
+    pub fn get_job_queue_item(&self, queue_id: &str) -> Result<Option<JobQueueItem>> {
+        let item = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    queue_id,
+                    tenant_id,
+                    project_id,
+                    job_id,
+                    target,
+                    profile,
+                    policy_path,
+                    trigger,
+                    requested_by,
+                    persist_artifacts,
+                    status,
+                    attempts,
+                    max_attempts,
+                    available_at,
+                    claimed_by,
+                    claimed_at,
+                    lease_expires_at,
+                    created_at,
+                    updated_at,
+                    last_error
+                FROM job_queue
+                WHERE queue_id = ?1
+                "#,
+                [queue_id],
+                map_job_queue_item,
+            )
+            .optional()?;
+
+        Ok(item)
+    }
+
+    pub fn claim_next_job_queue_item(
+        &self,
+        worker_id: &str,
+        lease_seconds: u64,
+    ) -> Result<Option<JobQueueItem>> {
+        let now = Utc::now().to_rfc3339();
+
+        let candidate = self
+            .conn
+            .query_row(
+                r#"
+                SELECT
+                    queue_id,
+                    tenant_id,
+                    project_id,
+                    job_id,
+                    target,
+                    profile,
+                    policy_path,
+                    trigger,
+                    requested_by,
+                    persist_artifacts,
+                    status,
+                    attempts,
+                    max_attempts,
+                    available_at,
+                    claimed_by,
+                    claimed_at,
+                    lease_expires_at,
+                    created_at,
+                    updated_at,
+                    last_error
+                FROM job_queue
+                WHERE status = 'pending' AND available_at <= ?1
+                ORDER BY available_at ASC, created_at ASC
+                LIMIT 1
+                "#,
+                [now],
+                map_job_queue_item,
+            )
+            .optional()?;
+
+        let Some(mut item) = candidate else {
+            return Ok(None);
+        };
+
+        item.claim(worker_id.to_string(), lease_seconds);
+
+        let updated = self.conn.execute(
+            r#"
+            UPDATE job_queue
+            SET
+                status = ?1,
+                claimed_by = ?2,
+                claimed_at = ?3,
+                lease_expires_at = ?4,
+                updated_at = ?5
+            WHERE queue_id = ?6 AND status = 'pending'
+            "#,
+            params![
+                item.status.to_string(),
+                item.claimed_by,
+                item.claimed_at.map(|d| d.to_rfc3339()),
+                item.lease_expires_at.map(|d| d.to_rfc3339()),
+                item.updated_at.to_rfc3339(),
+                item.queue_id
+            ],
+        )?;
+
+        if updated == 0 {
+            return Ok(None);
+        }
+
+        self.append_job_execution_from_queue(&item, None, None, None)?;
+        Ok(Some(item))
+    }
+
+    pub fn mark_job_queue_running(&self, queue_id: &str) -> Result<Option<JobQueueItem>> {
+        let Some(mut item) = self.get_job_queue_item(queue_id)? else {
+            return Ok(None);
+        };
+
+        item.start();
+
         self.conn.execute(
             r#"
-            INSERT OR REPLACE INTO job_executions (
+            UPDATE job_queue
+            SET status = ?1, updated_at = ?2
+            WHERE queue_id = ?3
+            "#,
+            params![
+                item.status.to_string(),
+                item.updated_at.to_rfc3339(),
+                item.queue_id
+            ],
+        )?;
+
+        self.append_job_execution_from_queue(&item, None, None, None)?;
+        Ok(Some(item))
+    }
+
+    pub fn mark_job_queue_succeeded(
+        &self,
+        queue_id: &str,
+        result: &Value,
+    ) -> Result<Option<JobQueueItem>> {
+        let Some(mut item) = self.get_job_queue_item(queue_id)? else {
+            return Ok(None);
+        };
+
+        item.succeed();
+
+        self.conn.execute(
+            r#"
+            UPDATE job_queue
+            SET
+                status = ?1,
+                updated_at = ?2,
+                lease_expires_at = NULL
+            WHERE queue_id = ?3
+            "#,
+            params![
+                item.status.to_string(),
+                item.updated_at.to_rfc3339(),
+                item.queue_id
+            ],
+        )?;
+
+        let finished_at = Some(Utc::now());
+        self.append_job_execution_from_queue(&item, Some(result), None, finished_at)?;
+        Ok(Some(item))
+    }
+
+    pub fn mark_job_queue_failed(
+        &self,
+        queue_id: &str,
+        error_message: &str,
+        retry_delay_seconds: Option<u64>,
+    ) -> Result<Option<JobQueueItem>> {
+        let Some(mut item) = self.get_job_queue_item(queue_id)? else {
+            return Ok(None);
+        };
+
+        item.fail(error_message.to_string(), retry_delay_seconds);
+
+        self.conn.execute(
+            r#"
+            UPDATE job_queue
+            SET
+                status = ?1,
+                attempts = ?2,
+                available_at = ?3,
+                claimed_by = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                updated_at = ?4,
+                last_error = ?5
+            WHERE queue_id = ?6
+            "#,
+            params![
+                item.status.to_string(),
+                item.attempts,
+                item.available_at.to_rfc3339(),
+                item.updated_at.to_rfc3339(),
+                item.last_error,
+                item.queue_id
+            ],
+        )?;
+
+        let finished_at = Some(Utc::now());
+        self.append_job_execution_from_queue(
+            &item,
+            None,
+            Some(error_message.to_string()),
+            finished_at,
+        )?;
+        Ok(Some(item))
+    }
+
+    fn append_job_execution_from_queue(
+        &self,
+        item: &JobQueueItem,
+        result_json: Option<&Value>,
+        error_message: Option<String>,
+        finished_at: Option<DateTime<Utc>>,
+    ) -> Result<()> {
+        let execution = JobExecutionRecord {
+            execution_id: format!(
+                "{}:{}",
+                item.queue_id,
+                Utc::now().timestamp_nanos_opt().unwrap_or(0)
+            ),
+            queue_id: item.queue_id.clone(),
+            tenant_id: item.tenant_id.clone(),
+            project_id: item.project_id.clone(),
+            job_id: item.job_id.clone(),
+            worker_id: item.claimed_by.clone(),
+            status: item.status,
+            started_at: item.claimed_at,
+            finished_at,
+            result_json: result_json.map(serde_json::to_string).transpose()?,
+            error_message,
+            created_at: Utc::now(),
+        };
+
+        self.conn.execute(
+            r#"
+            INSERT INTO job_executions (
                 execution_id,
                 queue_id,
                 tenant_id,
@@ -3101,5 +3349,49 @@ mod tests {
         let listed = store.list_job_queue_scoped(&scope, 10).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].queue_id, item.queue_id);
+    }
+
+    #[test]
+    fn queue_lifecycle_works() {
+        let db_path = std::env::temp_dir().join(format!(
+            "atlas-store-queue-lifecycle-test-{}.db",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+
+        let store = AtlasStore::open(&db_path).unwrap();
+        store.initialize().unwrap();
+
+        let scope = StorageScope::new("tenant-a", "project-x");
+        let dispatch = JobDispatchRequest::new(
+            "tenant-a",
+            "project-x",
+            "job-1",
+            "example.com",
+            "standard",
+            JobTrigger::Manual,
+        );
+
+        let queued = store
+            .enqueue_job_dispatch_scoped(&scope, &dispatch)
+            .unwrap();
+        assert_eq!(queued.status, JobQueueStatus::Pending);
+
+        let claimed = store
+            .claim_next_job_queue_item("worker-test", 30)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.status, JobQueueStatus::Claimed);
+
+        let running = store
+            .mark_job_queue_running(&claimed.queue_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(running.status, JobQueueStatus::Running);
+
+        let done = store
+            .mark_job_queue_succeeded(&running.queue_id, &serde_json::json!({"ok": true}))
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.status, JobQueueStatus::Succeeded);
     }
 }
