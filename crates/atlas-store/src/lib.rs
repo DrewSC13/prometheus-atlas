@@ -617,6 +617,9 @@ impl AtlasStore {
             CREATE INDEX IF NOT EXISTS idx_audit_scope
             ON audit_events (tenant_id, project_id, created_at DESC);
 
+            CREATE INDEX IF NOT EXISTS idx_job_executions_scope_job
+            ON job_executions (tenant_id, project_id, job_id, created_at DESC);
+
             CREATE INDEX IF NOT EXISTS idx_job_executions_queue
             ON job_executions (queue_id, created_at DESC);
 
@@ -3009,8 +3012,8 @@ impl AtlasStore {
             stats: atlas_graph::GraphStats::default(),
             topology: atlas_graph::GraphTopologySummary::default(),
         };
-        graph.recompute_metadata();
 
+        graph.recompute_metadata();
         Ok(Some(graph))
     }
 

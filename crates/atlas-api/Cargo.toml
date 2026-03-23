@@ -41,3 +41,4 @@ atlas-report = { path = "../atlas-report" }
 atlas-snapshot = { path = "../atlas-snapshot" }
 atlas-store = { path = "../atlas-store" }
 atlas-tenancy = { path = "../atlas-tenancy" }
+atlas-risk = { path = "../atlas-risk" }

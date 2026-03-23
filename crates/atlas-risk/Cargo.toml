@@ -17,6 +17,7 @@ atlas-episodes = { path = "../atlas-episodes" }
 atlas-graph = { path = "../atlas-graph" }
 atlas-report = { path = "../atlas-report" }
 atlas-snapshot = { path = "../atlas-snapshot" }
+atlas-store = { path = "../atlas-store" }
 
 [dev-dependencies]
 atlas-core = { path = "../atlas-core" }

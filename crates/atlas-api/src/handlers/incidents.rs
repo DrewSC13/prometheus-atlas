@@ -8,7 +8,10 @@ use axum::{
 use crate::{
     auth::{default_limit, scope_from_auth, AuthContext},
     error::{ApiError, ApiResult},
-    models::{ApiEnvelope, IncidentPatchRequest, IncidentsResponse, PaginationMeta},
+    models::{
+        ApiEnvelope, IncidentDetailResponse, IncidentOperationsIntelligenceResponse,
+        IncidentPatchRequest, IncidentsResponse, PaginationMeta,
+    },
     state::AppState,
 };
 
@@ -16,6 +19,8 @@ use crate::{
 pub struct IncidentParams {
     pub state: Option<String>,
     pub owner: Option<String>,
+    pub severity: Option<String>,
+    pub source_kind: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -43,12 +48,22 @@ pub async fn list_incidents(
         .lock()
         .map_err(|_| ApiError::internal("store lock"))?;
 
-    let items = store.list_incidents_scoped(
+    let mut items = store.list_incidents_scoped(
         &scope,
         params.state.as_deref(),
         params.owner.as_deref(),
         limit,
     )?;
+
+    if let Some(severity) = params.severity.as_deref() {
+        items.retain(|item| item.severity.eq_ignore_ascii_case(severity));
+    }
+
+    if let Some(source_kind) = params.source_kind.as_deref() {
+        items.retain(|item| item.source_kind.eq_ignore_ascii_case(source_kind));
+    }
+
+    items.truncate(limit);
 
     Ok(Json(IncidentsResponse {
         data: items.clone(),
@@ -77,6 +92,82 @@ pub async fn get_incident(
         .ok_or_else(|| ApiError::not_found("incident no encontrado"))?;
 
     Ok(Json(ApiEnvelope { data: incident }))
+}
+
+pub async fn get_incident_detail(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Path(incident_id): Path<String>,
+) -> ApiResult<Json<ApiEnvelope<IncidentDetailResponse>>> {
+    auth.require_read()?;
+    let scope = scope_from_auth(&auth);
+
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| ApiError::internal("store lock"))?;
+
+    let incident = store
+        .get_incident_scoped(&scope, &incident_id)?
+        .ok_or_else(|| ApiError::not_found("incident no encontrado"))?;
+
+    let related_findings = match incident.source_kind.as_str() {
+        "finding" => {
+            let all = store.list_current_findings_operational_scoped(
+                &scope,
+                &incident.target,
+                None,
+                None,
+                None,
+                None,
+            )?;
+            all.into_iter()
+                .filter(|item| {
+                    item.finding_id == incident.source_id || item.resource == incident.resource
+                })
+                .collect()
+        }
+        _ => store
+            .list_current_findings_operational_scoped(
+                &scope,
+                &incident.target,
+                None,
+                None,
+                None,
+                None,
+            )?
+            .into_iter()
+            .filter(|item| item.resource == incident.resource || item.target == incident.target)
+            .take(25)
+            .collect(),
+    };
+
+    let related_owners = store
+        .list_asset_owners_scoped(&scope, Some(&incident.resource))?
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let related_executions = store
+        .list_job_executions_scoped(&scope, None, 50)?
+        .into_iter()
+        .filter(|execution| {
+            execution
+                .result_json
+                .as_deref()
+                .map(|body| body.contains(&incident.target))
+                .unwrap_or(false)
+        })
+        .take(10)
+        .collect::<Vec<_>>();
+
+    Ok(Json(ApiEnvelope {
+        data: IncidentDetailResponse {
+            incident,
+            related_findings,
+            related_owners,
+            related_executions,
+        },
+    }))
 }
 
 pub async fn patch_incident(
@@ -203,6 +294,36 @@ pub async fn note_incident(
             "incident_id": incident_id
         }),
     }))
+}
+
+pub async fn get_incident_operations_intelligence(
+    State(state): State<Arc<AppState>>,
+    auth: AuthContext,
+    Path(target): Path<String>,
+) -> ApiResult<Json<IncidentOperationsIntelligenceResponse>> {
+    auth.require_read()?;
+    let scope = scope_from_auth(&auth);
+
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| ApiError::internal("store lock"))?;
+
+    let findings =
+        store.list_current_findings_operational_scoped(&scope, &target, None, None, None, None)?;
+    let episodes = store.list_episodes_scoped(&scope, &target)?;
+    let owners = store.list_asset_owners_scoped(&scope, None)?;
+    let graph = store.load_latest_graph_scoped(&scope, &target)?;
+
+    let report = atlas_risk::build_incident_operations_intelligence(
+        &target,
+        &findings,
+        &episodes,
+        &owners,
+        graph.as_ref(),
+    );
+
+    Ok(Json(ApiEnvelope { data: report }))
 }
 
 async fn set_incident_state(

@@ -2,6 +2,7 @@ use atlas_drift::TimelineReport;
 use atlas_episodes::EpisodeCollection;
 use atlas_graph::{ExposureGraph, NodeKind};
 use atlas_snapshot::Snapshot;
+use atlas_store::{StoredAssetOwner, StoredCurrentFinding, StoredEpisode};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -116,6 +117,61 @@ pub struct AlertEvent {
     pub title: String,
     pub resource: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnershipGap {
+    pub resource: String,
+    pub severity: RiskSeverity,
+    pub reason: String,
+    pub related_findings: usize,
+    pub related_open_incidents: usize,
+    pub score: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnershipIntelligenceReport {
+    pub target: String,
+    pub generated_at: DateTime<Utc>,
+    pub total_owned_resources: usize,
+    pub total_unowned_resources: usize,
+    pub gaps: Vec<OwnershipGap>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OwnershipContext {
+    pub owner: Option<String>,
+    pub team: Option<String>,
+    pub business_service: Option<String>,
+    pub criticality: Option<String>,
+    pub confidence: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncidentCandidate {
+    pub incident_id: String,
+    pub source_kind: String,
+    pub source_id: String,
+    pub title: String,
+    pub target: String,
+    pub resource: String,
+    pub severity: RiskSeverity,
+    pub score: u32,
+    pub ownership: OwnershipContext,
+    pub blast_radius: usize,
+    pub related_entities: Vec<String>,
+    pub evidence: Vec<String>,
+    pub recommendation: String,
+    pub state_hint: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncidentOperationsIntelligence {
+    pub target: String,
+    pub generated_at: DateTime<Utc>,
+    pub total_candidates: usize,
+    pub open_now_candidates: usize,
+    pub candidates: Vec<IncidentCandidate>,
 }
 
 pub fn build_risk_report(
@@ -516,6 +572,210 @@ pub fn build_basic_alerts(report: &RiskReport) -> Vec<AlertEvent> {
     alerts
 }
 
+pub fn build_ownership_intelligence(
+    target: &str,
+    findings: &[StoredCurrentFinding],
+    incidents_open: usize,
+    asset_owners: &[StoredAssetOwner],
+) -> OwnershipIntelligenceReport {
+    let mut owner_map = BTreeMap::new();
+    for item in asset_owners {
+        owner_map.insert(item.resource.clone(), item);
+    }
+
+    let mut resources = BTreeMap::<String, usize>::new();
+    for finding in findings {
+        *resources.entry(finding.resource.clone()).or_insert(0) += 1;
+    }
+
+    let mut gaps = Vec::new();
+    let mut total_owned_resources = 0usize;
+    let mut total_unowned_resources = 0usize;
+
+    for (resource, related_findings) in resources {
+        let owned = owner_map.contains_key(&resource);
+        if owned {
+            total_owned_resources += 1;
+            continue;
+        }
+
+        total_unowned_resources += 1;
+        let severity = if related_findings >= 3 {
+            RiskSeverity::High
+        } else if related_findings >= 2 {
+            RiskSeverity::Medium
+        } else {
+            RiskSeverity::Low
+        };
+
+        let score = match severity {
+            RiskSeverity::Critical => 100,
+            RiskSeverity::High => 75,
+            RiskSeverity::Medium => 45,
+            RiskSeverity::Low => 20,
+        } + (related_findings as u32 * 5);
+
+        gaps.push(OwnershipGap {
+            resource,
+            severity,
+            reason: "resource sin owner explícito".to_string(),
+            related_findings,
+            related_open_incidents: incidents_open,
+            score,
+        });
+    }
+
+    gaps.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.resource.cmp(&b.resource))
+    });
+
+    OwnershipIntelligenceReport {
+        target: target.to_string(),
+        generated_at: Utc::now(),
+        total_owned_resources,
+        total_unowned_resources,
+        gaps,
+    }
+}
+
+pub fn build_incident_operations_intelligence(
+    target: &str,
+    findings: &[StoredCurrentFinding],
+    episodes: &[StoredEpisode],
+    asset_owners: &[StoredAssetOwner],
+    graph: Option<&ExposureGraph>,
+) -> IncidentOperationsIntelligence {
+    let owner_map = asset_owners
+        .iter()
+        .map(|item| (item.resource.clone(), item.clone()))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut candidates = Vec::new();
+
+    for finding in findings {
+        if finding.operational_state.eq_ignore_ascii_case("resolved") {
+            continue;
+        }
+
+        let severity = risk_severity_from_finding(&finding.severity, finding.score);
+        let ownership = ownership_for_resource(&owner_map, &finding.resource);
+        let related_entities = graph
+            .map(|g| related_labels_for_resource(g, &finding.resource, 8))
+            .unwrap_or_default();
+        let blast_radius = related_entities.len();
+
+        let mut score = finding.score;
+        score += ownership_penalty(&ownership);
+        score += blast_radius as u32 * 3;
+
+        let evidence = compact_evidence(&[
+            Some(format!("finding_id={}", finding.finding_id)),
+            Some(format!("category={}", finding.category)),
+            Some(format!("analytic_state={}", finding.state)),
+            Some(format!("operational_state={}", finding.operational_state)),
+            Some(format!("criticality={}", finding.criticality)),
+            ownership
+                .owner
+                .as_ref()
+                .map(|owner| format!("owner={owner}")),
+            ownership.team.as_ref().map(|team| format!("team={team}")),
+            Some(format!("blast_radius={blast_radius}")),
+        ]);
+
+        candidates.push(IncidentCandidate {
+            incident_id: format!("finding:{}", finding.finding_id),
+            source_kind: "finding".to_string(),
+            source_id: finding.finding_id.clone(),
+            title: format!("Incident candidate from finding: {}", finding.title),
+            target: target.to_string(),
+            resource: finding.resource.clone(),
+            severity,
+            score,
+            ownership,
+            blast_radius,
+            related_entities,
+            evidence,
+            recommendation: build_candidate_recommendation(
+                "finding",
+                &finding.resource,
+                finding.owner.as_deref(),
+            ),
+            state_hint: if finding
+                .operational_state
+                .eq_ignore_ascii_case("acknowledged")
+            {
+                "acknowledged".to_string()
+            } else {
+                "open".to_string()
+            },
+        });
+    }
+
+    for episode in episodes {
+        let severity = risk_severity_from_finding(&episode.severity, episode.score);
+        let ownership = ownership_for_resource(&owner_map, target);
+        let related_entities = graph
+            .map(|g| related_labels_for_resource(g, target, 12))
+            .unwrap_or_default();
+        let blast_radius = episode.resource_count.max(related_entities.len());
+
+        let mut score = episode.score;
+        score += ownership_penalty(&ownership);
+        score += blast_radius as u32 * 2;
+
+        let evidence = compact_evidence(&[
+            Some(format!("episode_id={}", episode.episode_id)),
+            Some(format!("kind={}", episode.kind)),
+            Some(format!("criticality={}", episode.criticality)),
+            Some(format!("resource_count={}", episode.resource_count)),
+            Some(format!("state={}", episode.state)),
+            Some(format!("blast_radius={blast_radius}")),
+        ]);
+
+        candidates.push(IncidentCandidate {
+            incident_id: format!("episode:{}", episode.episode_id),
+            source_kind: "episode".to_string(),
+            source_id: episode.episode_id.clone(),
+            title: format!("Incident candidate from episode: {}", episode.title),
+            target: target.to_string(),
+            resource: target.to_string(),
+            severity,
+            score,
+            ownership,
+            blast_radius,
+            related_entities,
+            evidence,
+            recommendation:
+                "Coordinar análisis transversal del episodio y asignar ownership operativo."
+                    .to_string(),
+            state_hint: "open".to_string(),
+        });
+    }
+
+    candidates.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| b.severity.cmp(&a.severity))
+            .then_with(|| a.source_kind.cmp(&b.source_kind))
+            .then_with(|| a.source_id.cmp(&b.source_id))
+    });
+
+    let open_now_candidates = candidates
+        .iter()
+        .filter(|c| !c.state_hint.eq_ignore_ascii_case("resolved"))
+        .count();
+
+    IncidentOperationsIntelligence {
+        target: target.to_string(),
+        generated_at: Utc::now(),
+        total_candidates: candidates.len(),
+        open_now_candidates,
+        candidates,
+    }
+}
+
 fn build_summary_recommendations(
     risk: &RiskReport,
     graph: &GraphSummaryView,
@@ -583,6 +843,111 @@ fn build_degree_map(graph: &ExposureGraph) -> BTreeMap<String, usize> {
     }
 
     degree_map
+}
+
+fn related_labels_for_resource(graph: &ExposureGraph, resource: &str, limit: usize) -> Vec<String> {
+    let mut matched_node_ids = BTreeSet::new();
+
+    for node in &graph.nodes {
+        if node.label.eq_ignore_ascii_case(resource)
+            || node
+                .attributes
+                .values()
+                .any(|value| value.eq_ignore_ascii_case(resource))
+        {
+            matched_node_ids.insert(node.node_id.clone());
+        }
+    }
+
+    if matched_node_ids.is_empty() {
+        return Vec::new();
+    }
+
+    let mut related = BTreeSet::new();
+
+    for edge in &graph.edges {
+        let from_match = matched_node_ids.contains(&edge.from);
+        let to_match = matched_node_ids.contains(&edge.to);
+
+        if !(from_match || to_match) {
+            continue;
+        }
+
+        let neighbor_id = if from_match { &edge.to } else { &edge.from };
+
+        if let Some(node) = graph.nodes.iter().find(|n| &n.node_id == neighbor_id) {
+            related.insert(format!("{} [{}]", node.label, node.kind));
+        }
+    }
+
+    related.into_iter().take(limit).collect()
+}
+
+fn ownership_for_resource(
+    owner_map: &BTreeMap<String, StoredAssetOwner>,
+    resource: &str,
+) -> OwnershipContext {
+    if let Some(owner) = owner_map.get(resource) {
+        OwnershipContext {
+            owner: Some(owner.owner.clone()),
+            team: owner.team.clone(),
+            business_service: owner.business_service.clone(),
+            criticality: owner.criticality.clone(),
+            confidence: if owner.team.is_some() && owner.business_service.is_some() {
+                95
+            } else if owner.team.is_some() || owner.business_service.is_some() {
+                80
+            } else {
+                65
+            },
+        }
+    } else {
+        OwnershipContext {
+            owner: None,
+            team: None,
+            business_service: None,
+            criticality: None,
+            confidence: 0,
+        }
+    }
+}
+
+fn ownership_penalty(context: &OwnershipContext) -> u32 {
+    if context.owner.is_none() {
+        20
+    } else if context.confidence < 70 {
+        10
+    } else {
+        0
+    }
+}
+
+fn risk_severity_from_finding(severity: &str, score: u32) -> RiskSeverity {
+    if severity.eq_ignore_ascii_case("high") || score >= 90 {
+        RiskSeverity::High
+    } else if severity.eq_ignore_ascii_case("medium") || score >= 50 {
+        RiskSeverity::Medium
+    } else {
+        RiskSeverity::Low
+    }
+}
+
+fn build_candidate_recommendation(
+    source_kind: &str,
+    resource: &str,
+    current_owner: Option<&str>,
+) -> String {
+    match (source_kind, current_owner) {
+        ("finding", Some(owner)) => format!(
+            "Asignar seguimiento inmediato a {} y validar remediación sobre {}.",
+            owner, resource
+        ),
+        ("finding", None) => format!(
+            "Definir ownership para {} antes de escalar la remediación.",
+            resource
+        ),
+        _ => "Revisar el incidente compuesto y coordinar la respuesta operativa.".to_string(),
+    }
 }
 
 fn push_risk(risks: &mut Vec<RiskItem>, seen: &mut BTreeSet<String>, item: RiskItem) {
@@ -823,5 +1188,86 @@ mod tests {
 
         let alerts = build_basic_alerts(&report);
         assert_eq!(alerts.len(), 1);
+    }
+
+    #[test]
+    fn builds_ownership_intelligence() {
+        let findings = vec![StoredCurrentFinding {
+            finding_id: "f1".to_string(),
+            run_id: "r1".to_string(),
+            target: "example.com".to_string(),
+            severity: "HIGH".to_string(),
+            state: "New".to_string(),
+            category: "new_admin_subdomain".to_string(),
+            title: "Nuevo subdominio administrativo".to_string(),
+            resource: "admin.example.com".to_string(),
+            asset_type: "Subdomain".to_string(),
+            environment: "Admin".to_string(),
+            criticality: "CRITICAL".to_string(),
+            score: 95,
+            tags_json: "[]".to_string(),
+            description: "desc".to_string(),
+            is_suppressed: false,
+            created_at: Utc::now().to_rfc3339(),
+            operational_state: "open".to_string(),
+            owner: None,
+            notes: None,
+            operational_updated_at: None,
+        }];
+
+        let report = build_ownership_intelligence("example.com", &findings, 0, &[]);
+        assert_eq!(report.total_unowned_resources, 1);
+        assert_eq!(report.gaps.len(), 1);
+    }
+
+    #[test]
+    fn builds_incident_operations_intelligence() {
+        let findings = vec![StoredCurrentFinding {
+            finding_id: "f1".to_string(),
+            run_id: "r1".to_string(),
+            target: "example.com".to_string(),
+            severity: "HIGH".to_string(),
+            state: "New".to_string(),
+            category: "new_admin_subdomain".to_string(),
+            title: "Nuevo subdominio administrativo".to_string(),
+            resource: "admin.example.com".to_string(),
+            asset_type: "Subdomain".to_string(),
+            environment: "Admin".to_string(),
+            criticality: "CRITICAL".to_string(),
+            score: 95,
+            tags_json: "[]".to_string(),
+            description: "desc".to_string(),
+            is_suppressed: false,
+            created_at: Utc::now().to_rfc3339(),
+            operational_state: "open".to_string(),
+            owner: None,
+            notes: None,
+            operational_updated_at: None,
+        }];
+
+        let episodes = vec![StoredEpisode {
+            episode_id: "ep1".to_string(),
+            target: "example.com".to_string(),
+            title: "Admin exposure".to_string(),
+            kind: "AdministrativeExposure".to_string(),
+            severity: "HIGH".to_string(),
+            criticality: "CRITICAL".to_string(),
+            score: 180,
+            state: "New".to_string(),
+            resource_count: 1,
+            resources_json: "[]".to_string(),
+            cluster_ids_json: "[]".to_string(),
+            started_at: Utc::now().to_rfc3339(),
+            ended_at: Utc::now().to_rfc3339(),
+            summary: "summary".to_string(),
+            explanation_json: "[]".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+        }];
+
+        let result =
+            build_incident_operations_intelligence("example.com", &findings, &episodes, &[], None);
+
+        assert_eq!(result.total_candidates, 2);
+        assert!(!result.candidates.is_empty());
     }
 }

@@ -31,3 +31,4 @@ atlas-plugins = { path = "../../crates/atlas-plugins" }
 atlas-queue = { path = "../../crates/atlas-queue" }
 atlas-snapshot = { path = "../../crates/atlas-snapshot" }
 atlas-store = { path = "../../crates/atlas-store" }
+atlas-risk = { path = "../../crates/atlas-risk" }

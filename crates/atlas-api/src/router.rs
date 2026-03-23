@@ -62,6 +62,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/jobs/:job_id/disable", post(jobs::disable_job))
         .route("/v1/jobs/:job_id/run", post(jobs::run_job))
         .route("/v1/jobs/:job_id/delete", post(jobs::delete_job))
+        .route("/v1/job-queue", get(jobs::list_job_queue))
+        .route("/v1/job-queue/:queue_id", get(jobs::get_queue_item))
         .route(
             "/v1/jobs/:job_id/executions",
             get(executions::list_job_executions),
@@ -98,8 +100,20 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/v1/ownership/assets",
             get(ownership::list_asset_owners).post(ownership::upsert_asset_owner),
         )
+        .route(
+            "/v1/ownership/assets/:resource",
+            get(ownership::get_asset_owner),
+        )
+        .route(
+            "/v1/ownership/intelligence/:target",
+            get(ownership::get_ownership_intelligence),
+        )
         .route("/v1/incidents", get(incidents::list_incidents))
         .route("/v1/incidents/:incident_id", get(incidents::get_incident))
+        .route(
+            "/v1/incidents/:incident_id/detail",
+            get(incidents::get_incident_detail),
+        )
         .route(
             "/v1/incidents/:incident_id/patch",
             patch(incidents::patch_incident),
@@ -119,6 +133,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/incidents/:incident_id/note",
             post(incidents::note_incident),
+        )
+        .route(
+            "/v1/incidents/intelligence/:target",
+            get(incidents::get_incident_operations_intelligence),
         )
         .route("/v1/alerts/deliveries", get(alerts::list_alert_deliveries))
         .with_state(state)

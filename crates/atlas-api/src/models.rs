@@ -1,5 +1,6 @@
 use atlas_jobs::AtlasJob;
 use atlas_queue::{JobExecutionRecord, JobQueueItem};
+use atlas_risk::{IncidentOperationsIntelligence, OwnershipIntelligenceReport};
 use atlas_store::{
     StoredAlertDelivery, StoredAssetOwner, StoredAuditEvent, StoredCurrentFinding, StoredFinding,
     StoredIncident, StoredSavedQuery, StoredSnapshot, StoredTelemetryEvent,
@@ -170,6 +171,35 @@ pub struct HealthResponse {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct IncidentDetailResponse {
+    pub incident: StoredIncident,
+    pub related_findings: Vec<StoredCurrentFinding>,
+    pub related_owners: Vec<StoredAssetOwner>,
+    pub related_executions: Vec<JobExecutionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OwnerOperationalSummary {
+    pub owner: String,
+    pub team: Option<String>,
+    pub open_findings: usize,
+    pub open_incidents: usize,
+    pub total_risk_score: u32,
+    pub resources: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EnrichedTargetReport {
+    pub target: String,
+    pub summary: atlas_risk::SummaryReport,
+    pub risk: atlas_risk::RiskReport,
+    pub ownership: OwnershipIntelligenceReport,
+    pub incident_operations: IncidentOperationsIntelligence,
+    pub current_incidents: Vec<StoredIncident>,
+    pub owner_summaries: Vec<OwnerOperationalSummary>,
+}
+
 pub type FindingsResponse = PagedEnvelope<StoredCurrentFinding>;
 pub type JobsResponse = PagedEnvelope<AtlasJob>;
 pub type JobQueueResponse = PagedEnvelope<JobQueueItem>;
@@ -186,3 +216,6 @@ pub type MembershipsResponse = PagedEnvelope<Membership>;
 pub type AssetOwnersResponse = PagedEnvelope<StoredAssetOwner>;
 pub type IncidentsResponse = PagedEnvelope<StoredIncident>;
 pub type AlertDeliveriesResponse = PagedEnvelope<StoredAlertDelivery>;
+pub type OwnershipIntelligenceResponse = ApiEnvelope<OwnershipIntelligenceReport>;
+pub type IncidentOperationsIntelligenceResponse = ApiEnvelope<IncidentOperationsIntelligence>;
+pub type EnrichedTargetReportResponse = ApiEnvelope<EnrichedTargetReport>;

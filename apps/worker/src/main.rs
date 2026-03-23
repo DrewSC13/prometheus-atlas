@@ -1,12 +1,16 @@
 use anyhow::{bail, Result};
 use atlas_config::AppConfig;
 use atlas_plugins::default_registry_for;
+use atlas_risk::{
+    build_incident_operations_intelligence, build_ownership_intelligence, IncidentCandidate,
+};
 use atlas_snapshot::Snapshot;
 use atlas_store::{
     AlertDeliveryRequest, AtlasStore, StorageScope, StoredAlertDelivery, StoredIncident,
 };
 use clap::Parser;
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
@@ -170,8 +174,11 @@ async fn execute_queue_item(
     let mut episodes = 0usize;
     let mut graph_nodes = 0usize;
     let mut graph_edges = 0usize;
-    let mut incidents_seeded = 0usize;
+    let mut incidents_created = 0usize;
+    let mut incidents_updated = 0usize;
+    let mut incidents_resolved = 0usize;
     let mut alerts_recorded = 0usize;
+    let mut ownership_gaps = 0usize;
 
     if should_persist {
         store.register_snapshot_scoped(scope, &snapshot_path, &snapshot)?;
@@ -214,13 +221,20 @@ async fn execute_queue_item(
         graph_edges = bundle.graph.edge_count;
         store.store_graph_scoped(scope, &item.target, &bundle.graph)?;
 
-        let seeded = seed_incidents_from_current_state(config, store, scope, &item.target)?;
-        incidents_seeded = seeded.len();
+        let reconciliation = reconcile_incidents_from_current_state(
+            config,
+            store,
+            scope,
+            &item.target,
+            Some(&bundle.graph),
+        )
+        .await?;
 
-        for incident in seeded {
-            let deliveries = deliver_incident_alerts(config, store, scope, &incident).await?;
-            alerts_recorded += deliveries.len();
-        }
+        incidents_created = reconciliation.created;
+        incidents_updated = reconciliation.updated;
+        incidents_resolved = reconciliation.resolved;
+        alerts_recorded = reconciliation.alerts_recorded;
+        ownership_gaps = reconciliation.ownership_gaps;
     }
 
     let duration_ms = started.elapsed().as_millis();
@@ -238,8 +252,11 @@ async fn execute_queue_item(
             "episodes": episodes,
             "graph_nodes": graph_nodes,
             "graph_edges": graph_edges,
-            "incidents_seeded": incidents_seeded,
-            "alerts_recorded": alerts_recorded
+            "incidents_created": incidents_created,
+            "incidents_updated": incidents_updated,
+            "incidents_resolved": incidents_resolved,
+            "alerts_recorded": alerts_recorded,
+            "ownership_gaps": ownership_gaps
         }),
     )?;
 
@@ -253,107 +270,198 @@ async fn execute_queue_item(
         "episodes": episodes,
         "graph_nodes": graph_nodes,
         "graph_edges": graph_edges,
-        "incidents_seeded": incidents_seeded,
+        "incidents_created": incidents_created,
+        "incidents_updated": incidents_updated,
+        "incidents_resolved": incidents_resolved,
         "alerts_recorded": alerts_recorded,
+        "ownership_gaps": ownership_gaps,
         "duration_ms": duration_ms
     }))
 }
 
-fn seed_incidents_from_current_state(
+#[derive(Debug, Default)]
+struct IncidentReconciliationSummary {
+    created: usize,
+    updated: usize,
+    resolved: usize,
+    alerts_recorded: usize,
+    ownership_gaps: usize,
+}
+
+async fn reconcile_incidents_from_current_state(
     config: &AppConfig,
     store: &AtlasStore,
     scope: &StorageScope,
     target: &str,
-) -> Result<Vec<StoredIncident>> {
-    let mut created = Vec::new();
-
+    graph: Option<&atlas_graph::ExposureGraph>,
+) -> Result<IncidentReconciliationSummary> {
     let current_findings =
         store.list_current_findings_operational_scoped(scope, target, None, None, None, None)?;
-
-    for finding in current_findings {
-        let score_match = finding.score >= config.alerts.incident_open_score_threshold;
-        let severity_match = finding.severity.eq_ignore_ascii_case("high");
-
-        if !(score_match || severity_match) {
-            continue;
-        }
-
-        if finding.operational_state.eq_ignore_ascii_case("resolved") {
-            continue;
-        }
-
-        let incident_id = format!("finding:{}", finding.finding_id);
-        let existing = store.get_incident_scoped(scope, &incident_id)?;
-        if existing.is_some() {
-            continue;
-        }
-
-        let incident = StoredIncident {
-            incident_id: incident_id.clone(),
-            target: target.to_string(),
-            source_kind: "finding".to_string(),
-            source_id: finding.finding_id.clone(),
-            title: format!("Incident seed from finding: {}", finding.title),
-            severity: finding.severity.clone(),
-            score: finding.score,
-            state: "open".to_string(),
-            owner: finding.owner.clone(),
-            notes: None,
-            resource: finding.resource.clone(),
-            context_json: serde_json::to_string(&json!({
-                "category": finding.category,
-                "asset_type": finding.asset_type,
-                "criticality": finding.criticality,
-                "description": finding.description
-            }))?,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-        };
-
-        store.upsert_incident_scoped(scope, &incident)?;
-        created.push(incident);
-    }
-
     let episodes = store.list_episodes_scoped(scope, target)?;
-    for episode in episodes {
-        let is_high = episode.severity.eq_ignore_ascii_case("high")
-            || episode.criticality.eq_ignore_ascii_case("critical");
-        if !is_high {
-            continue;
+    let owners = store.list_asset_owners_scoped(scope, None)?;
+    let existing_incidents = store.list_incidents_scoped(scope, None, None, 500)?;
+
+    let ownership_report = build_ownership_intelligence(
+        target,
+        &current_findings,
+        existing_incidents
+            .iter()
+            .filter(|i| !i.state.eq_ignore_ascii_case("resolved"))
+            .count(),
+        &owners,
+    );
+
+    let operations_report = build_incident_operations_intelligence(
+        target,
+        &current_findings,
+        &episodes,
+        &owners,
+        graph,
+    );
+
+    let active_candidate_ids = operations_report
+        .candidates
+        .iter()
+        .map(|c| c.incident_id.clone())
+        .collect::<BTreeSet<_>>();
+
+    let mut summary = IncidentReconciliationSummary {
+        ownership_gaps: ownership_report.gaps.len(),
+        ..Default::default()
+    };
+
+    for candidate in &operations_report.candidates {
+        let existing = store.get_incident_scoped(scope, &candidate.incident_id)?;
+        let incident = candidate_to_incident(candidate);
+
+        match existing {
+            None => {
+                store.upsert_incident_scoped(scope, &incident)?;
+                summary.created += 1;
+
+                let deliveries =
+                    deliver_incident_alerts(config, store, scope, &incident, "incident.opened")
+                        .await?;
+                summary.alerts_recorded += deliveries.len();
+            }
+            Some(prev) => {
+                let mut next = incident.clone();
+                next.created_at = prev.created_at.clone();
+
+                if prev.state.eq_ignore_ascii_case("resolved") {
+                    next.state = "reopened".to_string();
+                } else {
+                    next.state = prev.state.clone();
+                }
+
+                if prev.owner.is_some() && next.owner.is_none() {
+                    next.owner = prev.owner.clone();
+                }
+
+                if prev.notes.is_some() && next.notes.is_none() {
+                    next.notes = prev.notes.clone();
+                }
+
+                if incident_changed(&prev, &next) {
+                    store.upsert_incident_scoped(scope, &next)?;
+                    summary.updated += 1;
+
+                    if prev.state.eq_ignore_ascii_case("resolved")
+                        && (next.state.eq_ignore_ascii_case("reopened")
+                            || next.state.eq_ignore_ascii_case("open"))
+                    {
+                        let deliveries = deliver_incident_alerts(
+                            config,
+                            store,
+                            scope,
+                            &next,
+                            "incident.reopened",
+                        )
+                        .await?;
+                        summary.alerts_recorded += deliveries.len();
+                    }
+                }
+            }
         }
-
-        let incident_id = format!("episode:{}", episode.episode_id);
-        let existing = store.get_incident_scoped(scope, &incident_id)?;
-        if existing.is_some() {
-            continue;
-        }
-
-        let incident = StoredIncident {
-            incident_id: incident_id.clone(),
-            target: target.to_string(),
-            source_kind: "episode".to_string(),
-            source_id: episode.episode_id.clone(),
-            title: format!("Incident seed from episode: {}", episode.title),
-            severity: episode.severity.clone(),
-            score: episode.score,
-            state: "open".to_string(),
-            owner: None,
-            notes: None,
-            resource: target.to_string(),
-            context_json: serde_json::to_string(&json!({
-                "criticality": episode.criticality,
-                "summary": episode.summary,
-                "resource_count": episode.resource_count
-            }))?,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-        };
-
-        store.upsert_incident_scoped(scope, &incident)?;
-        created.push(incident);
     }
 
-    Ok(created)
+    for existing in existing_incidents {
+        if existing.state.eq_ignore_ascii_case("resolved") {
+            continue;
+        }
+
+        if !existing.target.eq_ignore_ascii_case(target) {
+            continue;
+        }
+
+        if active_candidate_ids.contains(&existing.incident_id) {
+            continue;
+        }
+
+        store.set_incident_state_scoped(scope, &existing.incident_id, "resolved")?;
+        summary.resolved += 1;
+    }
+
+    store.record_telemetry_scoped(
+        scope,
+        "incident-reconciliation",
+        Some(target),
+        0,
+        &json!({
+            "target": target,
+            "created": summary.created,
+            "updated": summary.updated,
+            "resolved": summary.resolved,
+            "ownership_gaps": summary.ownership_gaps,
+            "candidate_count": operations_report.total_candidates
+        }),
+    )?;
+
+    Ok(summary)
+}
+
+fn candidate_to_incident(candidate: &IncidentCandidate) -> StoredIncident {
+    let now = chrono::Utc::now().to_rfc3339();
+
+    StoredIncident {
+        incident_id: candidate.incident_id.clone(),
+        target: candidate.target.clone(),
+        source_kind: candidate.source_kind.clone(),
+        source_id: candidate.source_id.clone(),
+        title: candidate.title.clone(),
+        severity: candidate.severity.to_string(),
+        score: candidate.score,
+        state: candidate.state_hint.clone(),
+        owner: candidate.ownership.owner.clone(),
+        notes: None,
+        resource: candidate.resource.clone(),
+        context_json: serde_json::to_string(&json!({
+            "blast_radius": candidate.blast_radius,
+            "related_entities": candidate.related_entities,
+            "evidence": candidate.evidence,
+            "recommendation": candidate.recommendation,
+            "ownership": {
+                "owner": candidate.ownership.owner,
+                "team": candidate.ownership.team,
+                "business_service": candidate.ownership.business_service,
+                "criticality": candidate.ownership.criticality,
+                "confidence": candidate.ownership.confidence
+            }
+        }))
+        .unwrap_or_else(|_| "{}".to_string()),
+        created_at: now.clone(),
+        updated_at: now,
+    }
+}
+
+fn incident_changed(prev: &StoredIncident, next: &StoredIncident) -> bool {
+    prev.title != next.title
+        || prev.severity != next.severity
+        || prev.score != next.score
+        || prev.state != next.state
+        || prev.owner != next.owner
+        || prev.resource != next.resource
+        || prev.context_json != next.context_json
 }
 
 async fn deliver_incident_alerts(
@@ -361,13 +469,14 @@ async fn deliver_incident_alerts(
     store: &AtlasStore,
     scope: &StorageScope,
     incident: &StoredIncident,
+    event_type: &str,
 ) -> Result<Vec<StoredAlertDelivery>> {
     if !config.alerts.enabled {
         return Ok(Vec::new());
     }
 
     let payload = json!({
-        "event_type": "incident.opened",
+        "event_type": event_type,
         "incident_id": incident.incident_id,
         "target": incident.target,
         "title": incident.title,
@@ -375,7 +484,8 @@ async fn deliver_incident_alerts(
         "score": incident.score,
         "resource": incident.resource,
         "source_kind": incident.source_kind,
-        "source_id": incident.source_id
+        "source_id": incident.source_id,
+        "owner": incident.owner
     });
 
     let client = reqwest::Client::new();
@@ -401,7 +511,7 @@ async fn deliver_incident_alerts(
             &AlertDeliveryRequest {
                 channel: "webhook".to_string(),
                 destination: url.clone(),
-                event_type: "incident.opened".to_string(),
+                event_type: event_type.to_string(),
                 status,
                 payload: payload.clone(),
                 response_body,
@@ -412,8 +522,8 @@ async fn deliver_incident_alerts(
     for url in &config.alerts.slack_webhooks {
         let slack_payload = json!({
             "text": format!(
-                "[{}] {} | target={} | score={}",
-                incident.severity, incident.title, incident.target, incident.score
+                "[{}] {} | target={} | score={} | event={}",
+                incident.severity, incident.title, incident.target, incident.score, event_type
             )
         });
 
@@ -436,7 +546,7 @@ async fn deliver_incident_alerts(
             &AlertDeliveryRequest {
                 channel: "slack".to_string(),
                 destination: url.clone(),
-                event_type: "incident.opened".to_string(),
+                event_type: event_type.to_string(),
                 status,
                 payload: slack_payload.clone(),
                 response_body,
@@ -450,7 +560,7 @@ async fn deliver_incident_alerts(
             &AlertDeliveryRequest {
                 channel: "email".to_string(),
                 destination: recipient.clone(),
-                event_type: "incident.opened".to_string(),
+                event_type: event_type.to_string(),
                 status: "pending_external".to_string(),
                 payload: payload.clone(),
                 response_body: Some(
