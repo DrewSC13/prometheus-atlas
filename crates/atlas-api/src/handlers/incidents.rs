@@ -48,11 +48,13 @@ pub async fn list_incidents(
         .lock()
         .map_err(|_| ApiError::internal("store lock"))?;
 
+    let fetch_limit = limit.saturating_mul(5).max(limit).min(1000);
+
     let mut items = store.list_incidents_scoped(
         &scope,
         params.state.as_deref(),
         params.owner.as_deref(),
-        limit,
+        fetch_limit,
     )?;
 
     if let Some(severity) = params.severity.as_deref() {
@@ -125,7 +127,7 @@ pub async fn get_incident_detail(
                 .filter(|item| {
                     item.finding_id == incident.source_id || item.resource == incident.resource
                 })
-                .collect()
+                .collect::<Vec<_>>()
         }
         _ => store
             .list_current_findings_operational_scoped(
@@ -139,7 +141,7 @@ pub async fn get_incident_detail(
             .into_iter()
             .filter(|item| item.resource == incident.resource || item.target == incident.target)
             .take(25)
-            .collect(),
+            .collect::<Vec<_>>(),
     };
 
     let related_owners = store
@@ -154,7 +156,7 @@ pub async fn get_incident_detail(
             execution
                 .result_json
                 .as_deref()
-                .map(|body| body.contains(&incident.target))
+                .map(|body| body.contains(&incident.target) || body.contains(&incident.incident_id))
                 .unwrap_or(false)
         })
         .take(10)
@@ -184,6 +186,10 @@ pub async fn patch_incident(
         .store
         .lock()
         .map_err(|_| ApiError::internal("store lock"))?;
+
+    store
+        .get_incident_scoped(&scope, &incident_id)?
+        .ok_or_else(|| ApiError::not_found("incident no encontrado"))?;
 
     if let Some(state_value) = body.state.as_deref() {
         store.set_incident_state_scoped(&scope, &incident_id, state_value)?;
@@ -247,6 +253,10 @@ pub async fn assign_incident(
         .lock()
         .map_err(|_| ApiError::internal("store lock"))?;
 
+    store
+        .get_incident_scoped(&scope, &incident_id)?
+        .ok_or_else(|| ApiError::not_found("incident no encontrado"))?;
+
     store.assign_incident_owner_scoped(&scope, &incident_id, &body.owner)?;
     store.record_audit_event_scoped(
         &scope,
@@ -278,6 +288,10 @@ pub async fn note_incident(
         .store
         .lock()
         .map_err(|_| ApiError::internal("store lock"))?;
+
+    store
+        .get_incident_scoped(&scope, &incident_id)?
+        .ok_or_else(|| ApiError::not_found("incident no encontrado"))?;
 
     store.set_incident_note_scoped(&scope, &incident_id, &body.notes)?;
     store.record_audit_event_scoped(
@@ -340,6 +354,10 @@ async fn set_incident_state(
         .store
         .lock()
         .map_err(|_| ApiError::internal("store lock"))?;
+
+    store
+        .get_incident_scoped(&scope, &incident_id)?
+        .ok_or_else(|| ApiError::not_found("incident no encontrado"))?;
 
     store.set_incident_state_scoped(&scope, &incident_id, incident_state)?;
     store.record_audit_event_scoped(

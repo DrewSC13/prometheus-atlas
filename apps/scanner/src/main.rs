@@ -9,10 +9,9 @@ use atlas_query::{
 };
 use atlas_report::build_executive_report;
 use atlas_scheduler::select_due_jobs;
-use atlas_store::{AtlasStore, ExportFormat};
+use atlas_store::{AtlasStore, ExportFormat, StorageScope};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
-use rusqlite::{params, Connection};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -1551,12 +1550,11 @@ async fn main() -> Result<()> {
 
         Commands::JobDelete { job_id } => {
             let started = Instant::now();
-            let db_path = PathBuf::from(&config.storage.path);
-            let store = AtlasStore::open(&db_path)?;
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
             store.initialize()?;
 
             let job = load_job_by_id(&store, &job_id)?;
-            delete_job_record(&db_path, &job_id)?;
+            store.delete_job_scoped(&StorageScope::global(), &job_id)?;
 
             println!("Job eliminado: {}", job_id);
 
@@ -1987,8 +1985,9 @@ async fn main() -> Result<()> {
         }
 
         Commands::FindingList { target, op_state } => {
-            let db_path = PathBuf::from(&config.storage.path);
-            let items = finding_list(&db_path, &target, op_state.as_deref())?;
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let items = finding_list(&store, &target, op_state.as_deref())?;
 
             println!("Target: {}", target);
             println!("Findings operativos: {}", items.len());
@@ -2012,38 +2011,44 @@ async fn main() -> Result<()> {
         }
 
         Commands::FindingAck { finding_id } => {
-            let db_path = PathBuf::from(&config.storage.path);
-            set_finding_op_state(&db_path, &finding_id, Some("acknowledged"), None, None)?;
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            set_finding_op_state(&store, &finding_id, Some("acknowledged"), None, None)?;
             println!("Finding actualizado: {} -> acknowledged", finding_id);
         }
 
         Commands::FindingResolve { finding_id } => {
-            let db_path = PathBuf::from(&config.storage.path);
-            set_finding_op_state(&db_path, &finding_id, Some("resolved"), None, None)?;
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            set_finding_op_state(&store, &finding_id, Some("resolved"), None, None)?;
             println!("Finding actualizado: {} -> resolved", finding_id);
         }
 
         Commands::FindingAccept { finding_id } => {
-            let db_path = PathBuf::from(&config.storage.path);
-            set_finding_op_state(&db_path, &finding_id, Some("accepted"), None, None)?;
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            set_finding_op_state(&store, &finding_id, Some("accepted"), None, None)?;
             println!("Finding actualizado: {} -> accepted", finding_id);
         }
 
         Commands::FindingAssign { finding_id, owner } => {
-            let db_path = PathBuf::from(&config.storage.path);
-            set_finding_op_state(&db_path, &finding_id, None, Some(&owner), None)?;
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            set_finding_op_state(&store, &finding_id, None, Some(&owner), None)?;
             println!("Finding asignado: {} -> {}", finding_id, owner);
         }
 
         Commands::FindingNote { finding_id, note } => {
-            let db_path = PathBuf::from(&config.storage.path);
-            set_finding_op_state(&db_path, &finding_id, None, None, Some(&note))?;
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            set_finding_op_state(&store, &finding_id, None, None, Some(&note))?;
             println!("Nota agregada a {}.", finding_id);
         }
 
         Commands::ReportFindings { target } => {
-            let db_path = PathBuf::from(&config.storage.path);
-            let items = finding_list(&db_path, &target, None)?;
+            let store = AtlasStore::open(Path::new(&config.storage.path))?;
+            store.initialize()?;
+            let items = finding_list(&store, &target, None)?;
 
             println!("Target: {}", target);
             println!("Resumen operativo de findings:");
@@ -2287,9 +2292,7 @@ fn record_telemetry_if_enabled(
 
 fn load_job_by_id(store: &AtlasStore, job_id: &str) -> Result<AtlasJob> {
     store
-        .list_jobs()?
-        .into_iter()
-        .find(|job| job.job_id == job_id)
+        .load_job_scoped(&StorageScope::global(), job_id)?
         .ok_or_else(|| anyhow!("job no encontrado: {job_id}"))
 }
 
@@ -2345,12 +2348,6 @@ async fn run_job_once(
     }
 
     Ok(snapshot_path)
-}
-
-fn delete_job_record(db_path: &Path, job_id: &str) -> Result<()> {
-    let conn = Connection::open(db_path)?;
-    conn.execute("DELETE FROM jobs WHERE job_id = ?1", params![job_id])?;
-    Ok(())
 }
 
 fn build_job_history(
@@ -2420,138 +2417,49 @@ struct FindingOperationalItem {
     op_state: String,
 }
 
-fn ensure_operational_findings_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS finding_ops (
-            finding_id TEXT PRIMARY KEY,
-            op_state TEXT NOT NULL DEFAULT 'open',
-            owner TEXT,
-            note TEXT,
-            updated_at TEXT NOT NULL
-        );
-        "#,
-    )?;
-    Ok(())
-}
-
-fn finding_exists(conn: &Connection, finding_id: &str) -> Result<bool> {
-    let mut stmt = conn.prepare("SELECT COUNT(*) FROM findings WHERE finding_id = ?1")?;
-    let count: i64 = stmt.query_row([finding_id], |row| row.get(0))?;
-    Ok(count > 0)
-}
-
 fn set_finding_op_state(
-    db_path: &Path,
+    store: &AtlasStore,
     finding_id: &str,
     op_state: Option<&str>,
     owner: Option<&str>,
     note: Option<&str>,
 ) -> Result<()> {
-    let conn = Connection::open(db_path)?;
-    ensure_operational_findings_schema(&conn)?;
-
-    if !finding_exists(&conn, finding_id)? {
-        bail!("finding no encontrado: {finding_id}");
+    if let Some(state) = op_state {
+        store.set_finding_operational_state(finding_id, state)?;
     }
 
-    let current = conn.query_row(
-        "SELECT op_state, owner, note FROM finding_ops WHERE finding_id = ?1",
-        [finding_id],
-        |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        },
-    );
+    if let Some(owner_value) = owner {
+        store.assign_finding_owner(finding_id, owner_value)?;
+    }
 
-    let (current_state, current_owner, current_note) = match current {
-        Ok(v) => v,
-        Err(rusqlite::Error::QueryReturnedNoRows) => (None, None, None),
-        Err(err) => return Err(err.into()),
-    };
-
-    let final_state = op_state
-        .map(|s| s.to_string())
-        .or(current_state)
-        .unwrap_or_else(|| "open".to_string());
-
-    let final_owner = owner.map(|s| s.to_string()).or(current_owner);
-    let final_note = note.map(|s| s.to_string()).or(current_note);
-
-    conn.execute(
-        r#"
-        INSERT INTO finding_ops (finding_id, op_state, owner, note, updated_at)
-        VALUES (?1, ?2, ?3, ?4, ?5)
-        ON CONFLICT(finding_id) DO UPDATE SET
-            op_state = excluded.op_state,
-            owner = excluded.owner,
-            note = excluded.note,
-            updated_at = excluded.updated_at
-        "#,
-        params![
-            finding_id,
-            final_state,
-            final_owner,
-            final_note,
-            Utc::now().to_rfc3339(),
-        ],
-    )?;
+    if let Some(note_value) = note {
+        store.set_finding_note(finding_id, note_value)?;
+    }
 
     Ok(())
 }
 
 fn finding_list(
-    db_path: &Path,
+    store: &AtlasStore,
     target: &str,
     op_state_filter: Option<&str>,
 ) -> Result<Vec<FindingOperationalItem>> {
-    let conn = Connection::open(db_path)?;
-    ensure_operational_findings_schema(&conn)?;
+    let findings =
+        store.list_current_findings_operational(target, None, None, op_state_filter, None)?;
 
-    let mut stmt = conn.prepare(
-        r#"
-        SELECT
-            f.finding_id,
-            f.severity,
-            f.title,
-            f.category,
-            f.resource,
-            f.score,
-            f.state,
-            COALESCE(o.op_state, 'open') AS op_state
-        FROM findings f
-        LEFT JOIN finding_ops o ON o.finding_id = f.finding_id
-        WHERE f.target = ?1
-        ORDER BY f.score DESC, f.created_at DESC
-        "#,
-    )?;
-
-    let rows = stmt.query_map([target], |row| {
-        Ok(FindingOperationalItem {
-            finding_id: row.get(0)?,
-            severity: row.get(1)?,
-            title: row.get(2)?,
-            category: row.get(3)?,
-            resource: row.get(4)?,
-            score: row.get::<_, i64>(5)? as u32,
-            analytic_state: row.get(6)?,
-            op_state: row.get(7)?,
+    Ok(findings
+        .into_iter()
+        .map(|item| FindingOperationalItem {
+            finding_id: item.finding_id,
+            severity: item.severity,
+            title: item.title,
+            category: item.category,
+            resource: item.resource,
+            score: item.score,
+            analytic_state: item.state,
+            op_state: item.operational_state,
         })
-    })?;
-
-    let mut items = Vec::new();
-    for row in rows {
-        items.push(row?);
-    }
-
-    if let Some(filter) = op_state_filter {
-        items.retain(|i| i.op_state.eq_ignore_ascii_case(filter));
-    }
-
-    Ok(items)
+        .collect())
 }
 
 fn print_human_diff_report(report: &atlas_diff::DiffReport) {

@@ -1,40 +1,46 @@
-use crate::{
-    auth::{scope_from_auth, AuthContext},
-    state::AppState,
-};
+use std::sync::Arc;
+
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
-use serde_json::{json, Value};
-use std::sync::Arc;
+use serde::Deserialize;
+
+use crate::{
+    auth::{default_limit, scope_from_auth, AuthContext},
+    error::{ApiError, ApiResult},
+    models::{PaginationMeta, SnapshotsResponse},
+    state::AppState,
+};
+
+#[derive(Debug, Deserialize)]
+pub struct SnapshotParams {
+    pub limit: Option<usize>,
+}
 
 pub async fn list_snapshots(
     State(state): State<Arc<AppState>>,
     auth: AuthContext,
     Path(target): Path<String>,
-) -> Result<Json<Value>, (axum::http::StatusCode, String)> {
+    Query(params): Query<SnapshotParams>,
+) -> ApiResult<Json<SnapshotsResponse>> {
+    auth.require_read()?;
     let scope = scope_from_auth(&auth);
-    let store = state.store.lock().map_err(|_| {
-        (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "store lock poisoned".to_string(),
-        )
-    })?;
+    let limit = default_limit(&state, params.limit);
 
-    let items = store
-        .list_snapshots_scoped(&scope, &target)
-        .map_err(internal_error)?;
+    let store = state
+        .store
+        .lock()
+        .map_err(|_| ApiError::internal("store lock"))?;
 
-    Ok(Json(json!({
-        "target": target,
-        "items": items,
-    })))
-}
+    let mut items = store.list_snapshots_scoped(&scope, &target)?;
+    items.truncate(limit);
 
-fn internal_error(err: anyhow::Error) -> (axum::http::StatusCode, String) {
-    (
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        err.to_string(),
-    )
+    Ok(Json(SnapshotsResponse {
+        data: items.clone(),
+        pagination: PaginationMeta {
+            limit,
+            returned: items.len(),
+        },
+    }))
 }

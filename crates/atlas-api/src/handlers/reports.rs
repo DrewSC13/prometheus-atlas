@@ -4,7 +4,6 @@ use axum::{
     extract::{Path as AxumPath, State},
     Json,
 };
-use serde_json::json;
 
 use crate::{
     auth::{scope_from_auth, AuthContext},
@@ -37,7 +36,11 @@ pub async fn get_report(
     let current_findings =
         store.list_current_findings_operational_scoped(&scope, &target, None, None, None, None)?;
     let owners = store.list_asset_owners_scoped(&scope, None)?;
-    let incidents = store.list_incidents_scoped(&scope, None, None, 200)?;
+    let incidents = store
+        .list_incidents_scoped(&scope, None, None, 200)?
+        .into_iter()
+        .filter(|item| item.target == target)
+        .collect::<Vec<_>>();
 
     let snapshot_models = snapshots
         .iter()
@@ -45,18 +48,7 @@ pub async fn get_report(
         .collect::<Vec<_>>();
 
     let timeline = build_timeline_from_store(&store, &scope, &target)?;
-    let episode_collection = if episodes.is_empty() {
-        None
-    } else {
-        Some(atlas_episodes::EpisodeCollection {
-            target: target.clone(),
-            episode_count: episodes.len(),
-            episodes: episodes
-                .iter()
-                .filter_map(map_stored_episode_to_risk_episode)
-                .collect(),
-        })
-    };
+    let episode_collection = build_episode_collection(&target, &episodes);
 
     let summary = atlas_risk::build_summary_report(
         &target,
@@ -88,16 +80,13 @@ pub async fn get_report(
         Some(&graph),
     );
 
-    let response = json!({
+    let response = serde_json::json!({
         "target": target,
         "summary": summary,
         "risk": risk,
         "ownership": ownership,
         "incident_operations": incident_operations,
-        "current_incidents": incidents
-            .into_iter()
-            .filter(|item| item.target == target)
-            .collect::<Vec<_>>()
+        "current_incidents": incidents,
     });
 
     Ok(Json(ApiEnvelope { data: response }))
@@ -137,18 +126,7 @@ pub async fn get_enriched_report(
         .collect::<Vec<_>>();
 
     let timeline = build_timeline_from_store(&store, &scope, &target)?;
-    let episode_collection = if episodes.is_empty() {
-        None
-    } else {
-        Some(atlas_episodes::EpisodeCollection {
-            target: target.clone(),
-            episode_count: episodes.len(),
-            episodes: episodes
-                .iter()
-                .filter_map(map_stored_episode_to_risk_episode)
-                .collect(),
-        })
-    };
+    let episode_collection = build_episode_collection(&target, &episodes);
 
     let summary = atlas_risk::build_summary_report(
         &target,
@@ -193,6 +171,30 @@ pub async fn get_enriched_report(
             owner_summaries,
         },
     }))
+}
+
+fn build_episode_collection(
+    target: &str,
+    episodes: &[atlas_store::StoredEpisode],
+) -> Option<atlas_episodes::EpisodeCollection> {
+    if episodes.is_empty() {
+        return None;
+    }
+
+    let mapped = episodes
+        .iter()
+        .filter_map(map_stored_episode_to_risk_episode)
+        .collect::<Vec<_>>();
+
+    if mapped.is_empty() {
+        return None;
+    }
+
+    Some(atlas_episodes::EpisodeCollection {
+        target: target.to_string(),
+        episode_count: mapped.len(),
+        episodes: mapped,
+    })
 }
 
 fn build_owner_operational_summaries(
@@ -375,6 +377,7 @@ impl EpisodeStateExt for atlas_episodes::EpisodeState {
             "new" => Ok(Self::New),
             "open" => Ok(Self::New),
             "active" => Ok(Self::New),
+            "recurring" => Ok(Self::Recurring),
             "persistent" => Ok(Self::Persistent),
             "resolved" => Ok(Self::Resolved),
             _ => Err(()),

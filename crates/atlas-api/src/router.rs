@@ -27,6 +27,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/snapshots/:target", get(snapshots::list_snapshots))
         .route("/v1/graphs/:target", get(graphs::get_graph))
         .route("/v1/reports/:target", get(reports::get_report))
+        .route(
+            "/v1/reports/:target/enriched",
+            get(reports::get_enriched_report),
+        )
         .route("/v1/findings/:target", get(findings::list_findings))
         .route(
             "/v1/findings/:target/current",

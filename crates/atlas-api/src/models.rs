@@ -1,6 +1,8 @@
 use atlas_jobs::AtlasJob;
 use atlas_queue::{JobExecutionRecord, JobQueueItem};
-use atlas_risk::{IncidentOperationsIntelligence, OwnershipIntelligenceReport};
+use atlas_risk::{
+    IncidentOperationsIntelligence, OwnershipIntelligenceReport, RiskReport, SummaryReport,
+};
 use atlas_store::{
     StoredAlertDelivery, StoredAssetOwner, StoredAuditEvent, StoredCurrentFinding, StoredFinding,
     StoredIncident, StoredSavedQuery, StoredSnapshot, StoredTelemetryEvent,
@@ -192,8 +194,8 @@ pub struct OwnerOperationalSummary {
 #[derive(Debug, Clone, Serialize)]
 pub struct EnrichedTargetReport {
     pub target: String,
-    pub summary: atlas_risk::SummaryReport,
-    pub risk: atlas_risk::RiskReport,
+    pub summary: SummaryReport,
+    pub risk: RiskReport,
     pub ownership: OwnershipIntelligenceReport,
     pub incident_operations: IncidentOperationsIntelligence,
     pub current_incidents: Vec<StoredIncident>,

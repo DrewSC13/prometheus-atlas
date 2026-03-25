@@ -295,11 +295,17 @@ async fn reconcile_incidents_from_current_state(
     target: &str,
     graph: Option<&atlas_graph::ExposureGraph>,
 ) -> Result<IncidentReconciliationSummary> {
+    let started = std::time::Instant::now();
+
     let current_findings =
         store.list_current_findings_operational_scoped(scope, target, None, None, None, None)?;
     let episodes = store.list_episodes_scoped(scope, target)?;
     let owners = store.list_asset_owners_scoped(scope, None)?;
-    let existing_incidents = store.list_incidents_scoped(scope, None, None, 500)?;
+    let existing_incidents = store
+        .list_incidents_scoped(scope, None, None, 500)?
+        .into_iter()
+        .filter(|item| item.target.eq_ignore_ascii_case(target))
+        .collect::<Vec<_>>();
 
     let ownership_report = build_ownership_intelligence(
         target,
@@ -390,10 +396,6 @@ async fn reconcile_incidents_from_current_state(
             continue;
         }
 
-        if !existing.target.eq_ignore_ascii_case(target) {
-            continue;
-        }
-
         if active_candidate_ids.contains(&existing.incident_id) {
             continue;
         }
@@ -406,7 +408,7 @@ async fn reconcile_incidents_from_current_state(
         scope,
         "incident-reconciliation",
         Some(target),
-        0,
+        started.elapsed().as_millis(),
         &json!({
             "target": target,
             "created": summary.created,
@@ -441,10 +443,10 @@ fn candidate_to_incident(candidate: &IncidentCandidate) -> StoredIncident {
             "evidence": candidate.evidence,
             "recommendation": candidate.recommendation,
             "ownership": {
-                "owner": candidate.ownership.owner,
-                "team": candidate.ownership.team,
-                "business_service": candidate.ownership.business_service,
-                "criticality": candidate.ownership.criticality,
+                "owner": candidate.ownership.owner.clone(),
+                "team": candidate.ownership.team.clone(),
+                "business_service": candidate.ownership.business_service.clone(),
+                "criticality": candidate.ownership.criticality.clone(),
                 "confidence": candidate.ownership.confidence
             }
         }))

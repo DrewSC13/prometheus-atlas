@@ -44,6 +44,16 @@ pub async fn create_job(
     Json(payload): Json<CreateJobRequest>,
 ) -> ApiResult<Json<ApiEnvelope<AtlasJob>>> {
     auth.require_write()?;
+
+    if payload.interval_seconds == 0 {
+        return Err(ApiError::bad_request("interval_seconds debe ser > 0"));
+    }
+
+    state
+        .config
+        .profile(&payload.profile)
+        .map_err(|err| ApiError::bad_request(err.to_string()))?;
+
     let scope = scope_from_auth(&auth);
 
     let job = AtlasJob {
