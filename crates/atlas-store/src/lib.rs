@@ -257,6 +257,7 @@ pub struct ScopedJob {
 #[derive(Debug, Clone)]
 struct TableColumn {
     name: String,
+    pk: i64,
 }
 
 pub struct AtlasStore {
@@ -1453,7 +1454,7 @@ impl AtlasStore {
             let op_notes = triage.as_ref().and_then(|t| t.notes.clone());
             let op_updated_at = triage.as_ref().map(|t| t.updated_at.clone());
 
-            let item = StoredCurrentFinding {
+            items.push(StoredCurrentFinding {
                 finding_id: finding.finding_id,
                 run_id: finding.run_id,
                 target: finding.target,
@@ -1474,9 +1475,7 @@ impl AtlasStore {
                 owner: op_owner,
                 notes: op_notes,
                 operational_updated_at: op_updated_at,
-            };
-
-            items.push(item);
+            });
         }
 
         if let Some(filter) = operational_state {
@@ -1847,20 +1846,15 @@ impl AtlasStore {
         )?;
 
         let rows = stmt.query_map(params![scope.tenant_id, scope.project_id], |row| {
-            let enabled_value = row_bool(row, 4)?;
-            let policy_path = row_optional_string(row, 5)?;
-            let last_run_at = row_optional_string(row, 6)?;
-            let created_at = row_string(row, 7)?;
-
             Ok(AtlasJob {
                 job_id: row_string(row, 0)?,
                 target: row_string(row, 1)?,
                 profile: row_string(row, 2)?,
                 interval_seconds: row_u64(row, 3)? as u64,
-                enabled: enabled_value,
-                policy_path,
-                last_run_at: parse_optional_datetime(last_run_at),
-                created_at: parse_datetime(created_at)?,
+                enabled: row_bool(row, 4)?,
+                policy_path: row_optional_string(row, 5)?,
+                last_run_at: parse_optional_datetime(row_optional_string(row, 6)?),
+                created_at: parse_datetime(row_string(row, 7)?)?,
             })
         })?;
 
@@ -1891,11 +1885,6 @@ impl AtlasStore {
         )?;
 
         let rows = stmt.query_map([], |row| {
-            let enabled_value = row_bool(row, 6)?;
-            let policy_path = row_optional_string(row, 7)?;
-            let last_run_at = row_optional_string(row, 8)?;
-            let created_at = row_string(row, 9)?;
-
             Ok(ScopedJob {
                 scope: StorageScope::new(row_string(row, 0)?, row_string(row, 1)?),
                 job: AtlasJob {
@@ -1903,10 +1892,10 @@ impl AtlasStore {
                     target: row_string(row, 3)?,
                     profile: row_string(row, 4)?,
                     interval_seconds: row_u64(row, 5)? as u64,
-                    enabled: enabled_value,
-                    policy_path,
-                    last_run_at: parse_optional_datetime(last_run_at),
-                    created_at: parse_datetime(created_at)?,
+                    enabled: row_bool(row, 6)?,
+                    policy_path: row_optional_string(row, 7)?,
+                    last_run_at: parse_optional_datetime(row_optional_string(row, 8)?),
+                    created_at: parse_datetime(row_string(row, 9)?)?,
                 },
             })
         })?;
@@ -2339,8 +2328,7 @@ impl AtlasStore {
             ],
         )?;
 
-        let finished_at = Some(Utc::now());
-        self.append_job_execution_from_queue(&item, Some(result), None, finished_at)?;
+        self.append_job_execution_from_queue(&item, Some(result), None, Some(Utc::now()))?;
         Ok(Some(item))
     }
 
@@ -2380,12 +2368,11 @@ impl AtlasStore {
             ],
         )?;
 
-        let finished_at = Some(Utc::now());
         self.append_job_execution_from_queue(
             &item,
             None,
             Some(error_message.to_string()),
-            finished_at,
+            Some(Utc::now()),
         )?;
         Ok(Some(item))
     }
@@ -3649,6 +3636,11 @@ impl AtlasStore {
             "graph_edges",
             "saved_queries",
             "finding_state",
+            "job_queue",
+            "job_executions",
+            "asset_owners",
+            "incidents",
+            "alert_deliveries",
         ] {
             self.ensure_scope_columns(table)?;
         }
@@ -3680,9 +3672,18 @@ impl AtlasStore {
 
     fn rebuild_saved_queries_if_needed(&self) -> Result<()> {
         let columns = self.read_table_info("saved_queries")?;
-        let has_tenant = columns.iter().any(|c| c.name == "tenant_id");
-        let has_project = columns.iter().any(|c| c.name == "project_id");
-        if !has_tenant || !has_project {
+        let tenant_pk = columns.iter().find(|c| c.name == "tenant_id").map(|c| c.pk);
+        let project_pk = columns
+            .iter()
+            .find(|c| c.name == "project_id")
+            .map(|c| c.pk);
+        let name_pk = columns.iter().find(|c| c.name == "name").map(|c| c.pk);
+
+        let already_composite = matches!(tenant_pk, Some(v) if v > 0)
+            && matches!(project_pk, Some(v) if v > 0)
+            && matches!(name_pk, Some(v) if v > 0);
+
+        if already_composite {
             return Ok(());
         }
 
@@ -3719,9 +3720,21 @@ impl AtlasStore {
 
     fn rebuild_finding_state_if_needed(&self) -> Result<()> {
         let columns = self.read_table_info("finding_state")?;
-        let has_tenant = columns.iter().any(|c| c.name == "tenant_id");
-        let has_project = columns.iter().any(|c| c.name == "project_id");
-        if !has_tenant || !has_project {
+        let tenant_pk = columns.iter().find(|c| c.name == "tenant_id").map(|c| c.pk);
+        let project_pk = columns
+            .iter()
+            .find(|c| c.name == "project_id")
+            .map(|c| c.pk);
+        let finding_pk = columns
+            .iter()
+            .find(|c| c.name == "finding_id")
+            .map(|c| c.pk);
+
+        let already_composite = matches!(tenant_pk, Some(v) if v > 0)
+            && matches!(project_pk, Some(v) if v > 0)
+            && matches!(finding_pk, Some(v) if v > 0);
+
+        if already_composite {
             return Ok(());
         }
 
@@ -3761,7 +3774,12 @@ impl AtlasStore {
     fn read_table_info(&self, table: &str) -> Result<Vec<TableColumn>> {
         let pragma = format!("PRAGMA table_info({table})");
         let mut stmt = self.conn.prepare(&pragma)?;
-        let rows = stmt.query_map([], |row| Ok(TableColumn { name: row.get(1)? }))?;
+        let rows = stmt.query_map([], |row| {
+            Ok(TableColumn {
+                name: row.get(1)?,
+                pk: row.get::<_, i64>(5)?,
+            })
+        })?;
 
         let mut columns = Vec::new();
         for row in rows {
