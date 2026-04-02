@@ -81,6 +81,10 @@ impl AuthContext {
             Err(ApiError::forbidden("requiere permisos de lectura"))
         }
     }
+
+    pub fn scope(&self) -> atlas_core::AtlasScope {
+        atlas_core::AtlasScope::new(self.tenant_id.clone(), self.project_id.clone())
+    }
 }
 
 #[async_trait]
@@ -114,12 +118,16 @@ impl FromRequestParts<std::sync::Arc<AppState>> for AuthContext {
                     claims.roles
                 };
 
-                return Ok(Self {
+                let auth = Self {
                     subject: claims.sub,
                     tenant_id: claims.tenant_id,
                     project_id: claims.project_id,
                     roles,
-                });
+                };
+
+                auth.scope().validate().map_err(ApiError::bad_request)?;
+
+                return Ok(auth);
             }
 
             return Err(ApiError::unauthorized(
@@ -161,17 +169,22 @@ impl FromRequestParts<std::sync::Arc<AppState>> for AuthContext {
             .filter(|items| !items.is_empty())
             .unwrap_or_else(|| vec!["admin".to_string()]);
 
-        Ok(Self {
+        let auth = Self {
             subject,
             tenant_id,
             project_id,
             roles,
-        })
+        };
+
+        auth.scope().validate().map_err(ApiError::bad_request)?;
+
+        Ok(auth)
     }
 }
 
 pub fn scope_from_auth(auth: &AuthContext) -> atlas_store::StorageScope {
-    atlas_store::StorageScope::new(auth.tenant_id.clone(), auth.project_id.clone())
+    let scope = auth.scope();
+    atlas_store::StorageScope::new(scope.tenant_id, scope.project_id)
 }
 
 pub fn default_limit(state: &AppState, requested: Option<usize>) -> usize {
@@ -195,6 +208,9 @@ pub fn issue_token(
     project_id: &str,
     role: &str,
 ) -> Result<String, ApiError> {
+    let scope = atlas_core::AtlasScope::new(tenant_id.to_string(), project_id.to_string());
+    scope.validate().map_err(ApiError::bad_request)?;
+
     let now = chrono::Utc::now().timestamp() as usize;
     let exp = now + state.config.auth.jwt_expiration_seconds as usize;
 

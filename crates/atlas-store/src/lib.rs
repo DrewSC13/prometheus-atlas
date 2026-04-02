@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use atlas_core::{IncidentState, OperationalState};
 use atlas_drift::DriftReport;
 use atlas_episodes::RiskEpisode;
 use atlas_graph::{EdgeKind, ExposureGraph, GraphEdge, GraphNode, NodeKind};
@@ -235,6 +236,11 @@ pub struct StoredAlertDelivery {
     pub status: String,
     pub payload_json: String,
     pub response_body: Option<String>,
+    pub attempt_count: u32,
+    pub last_attempt_at: Option<String>,
+    pub next_attempt_at: Option<String>,
+    pub delivered_at: Option<String>,
+    pub error_message: Option<String>,
     pub created_at: String,
 }
 
@@ -246,6 +252,11 @@ pub struct AlertDeliveryRequest {
     pub status: String,
     pub payload: Value,
     pub response_body: Option<String>,
+    pub attempt_count: Option<u32>,
+    pub last_attempt_at: Option<String>,
+    pub next_attempt_at: Option<String>,
+    pub delivered_at: Option<String>,
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -579,6 +590,11 @@ impl AtlasStore {
                 status TEXT NOT NULL,
                 payload_json TEXT NOT NULL,
                 response_body TEXT,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                last_attempt_at TEXT,
+                next_attempt_at TEXT,
+                delivered_at TEXT,
+                error_message TEXT,
                 created_at TEXT NOT NULL,
                 PRIMARY KEY (tenant_id, project_id, delivery_id)
             );
@@ -632,6 +648,12 @@ impl AtlasStore {
 
             CREATE INDEX IF NOT EXISTS idx_alert_deliveries_scope
             ON alert_deliveries (tenant_id, project_id, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_alert_deliveries_status
+            ON alert_deliveries (tenant_id, project_id, status, created_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_alert_deliveries_channel
+            ON alert_deliveries (tenant_id, project_id, channel, created_at DESC);
             "#,
         )?;
         Ok(())
@@ -1264,6 +1286,8 @@ impl AtlasStore {
         operational_state: &str,
     ) -> Result<()> {
         self.ensure_finding_for_triage(scope, finding_id)?;
+        let normalized_state =
+            OperationalState::normalize_str(operational_state).map_err(|e| anyhow!(e))?;
         let current = self.get_finding_operational_state_scoped(scope, finding_id)?;
         let owner = current.as_ref().and_then(|c| c.owner.clone());
         let notes = current.as_ref().and_then(|c| c.notes.clone());
@@ -1289,7 +1313,7 @@ impl AtlasStore {
                 scope.tenant_id,
                 scope.project_id,
                 finding_id,
-                operational_state,
+                normalized_state,
                 owner,
                 notes,
                 Utc::now().to_rfc3339(),
@@ -1314,7 +1338,7 @@ impl AtlasStore {
         let operational_state = current
             .as_ref()
             .map(|c| c.operational_state.clone())
-            .unwrap_or_else(|| "open".to_string());
+            .unwrap_or_else(|| OperationalState::Open.as_str().to_string());
         let notes = current.as_ref().and_then(|c| c.notes.clone());
 
         self.conn.execute(
@@ -1363,7 +1387,7 @@ impl AtlasStore {
         let operational_state = current
             .as_ref()
             .map(|c| c.operational_state.clone())
-            .unwrap_or_else(|| "open".to_string());
+            .unwrap_or_else(|| OperationalState::Open.as_str().to_string());
         let owner = current.as_ref().and_then(|c| c.owner.clone());
 
         self.conn.execute(
@@ -1446,7 +1470,7 @@ impl AtlasStore {
             let op_state = triage
                 .as_ref()
                 .map(|t| t.operational_state.clone())
-                .unwrap_or_else(|| "open".to_string());
+                .unwrap_or_else(|| OperationalState::Open.as_str().to_string());
             let op_owner = triage
                 .as_ref()
                 .and_then(|t| t.owner.clone())
@@ -1479,7 +1503,9 @@ impl AtlasStore {
         }
 
         if let Some(filter) = operational_state {
-            items.retain(|f| f.operational_state.eq_ignore_ascii_case(filter));
+            let normalized_filter =
+                OperationalState::normalize_str(filter).map_err(|e| anyhow!(e))?;
+            items.retain(|f| f.operational_state.eq_ignore_ascii_case(normalized_filter));
         }
 
         if let Some(filter) = owner {
@@ -2872,7 +2898,6 @@ impl AtlasStore {
         for row in rows {
             graphs.push(row?);
         }
-
         Ok(graphs)
     }
 
@@ -3270,6 +3295,11 @@ impl AtlasStore {
         scope: &StorageScope,
         incident: &StoredIncident,
     ) -> Result<()> {
+        let normalized_state = IncidentState::from_str(&incident.state)
+            .map_err(|e| anyhow!(e))?
+            .as_str()
+            .to_string();
+
         self.conn.execute(
             r#"
             INSERT INTO incidents (
@@ -3314,7 +3344,7 @@ impl AtlasStore {
                 incident.title,
                 incident.severity,
                 incident.score,
-                incident.state,
+                normalized_state,
                 incident.owner,
                 incident.notes,
                 incident.resource,
@@ -3437,7 +3467,11 @@ impl AtlasStore {
         }
 
         if let Some(state_filter) = state {
-            items.retain(|i| i.state.eq_ignore_ascii_case(state_filter));
+            let normalized_filter = IncidentState::from_str(state_filter)
+                .map_err(|e| anyhow!(e))?
+                .as_str()
+                .to_string();
+            items.retain(|i| i.state.eq_ignore_ascii_case(&normalized_filter));
         }
 
         if let Some(owner_filter) = owner {
@@ -3458,6 +3492,11 @@ impl AtlasStore {
         incident_id: &str,
         incident_state: &str,
     ) -> Result<()> {
+        let normalized_state = IncidentState::from_str(incident_state)
+            .map_err(|e| anyhow!(e))?
+            .as_str()
+            .to_string();
+
         self.conn.execute(
             r#"
             UPDATE incidents
@@ -3465,7 +3504,7 @@ impl AtlasStore {
             WHERE tenant_id = ?3 AND project_id = ?4 AND incident_id = ?5
             "#,
             params![
-                incident_state,
+                normalized_state,
                 Utc::now().to_rfc3339(),
                 scope.tenant_id,
                 scope.project_id,
@@ -3547,8 +3586,13 @@ impl AtlasStore {
                 status,
                 payload_json,
                 response_body,
+                attempt_count,
+                last_attempt_at,
+                next_attempt_at,
+                delivered_at,
+                error_message,
                 created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
             "#,
             params![
                 scope.tenant_id,
@@ -3560,6 +3604,11 @@ impl AtlasStore {
                 request.status,
                 payload_json,
                 request.response_body,
+                request.attempt_count.unwrap_or(0),
+                request.last_attempt_at,
+                request.next_attempt_at,
+                request.delivered_at,
+                request.error_message,
                 created_at
             ],
         )?;
@@ -3572,6 +3621,11 @@ impl AtlasStore {
             status: request.status.clone(),
             payload_json,
             response_body: request.response_body.clone(),
+            attempt_count: request.attempt_count.unwrap_or(0),
+            last_attempt_at: request.last_attempt_at.clone(),
+            next_attempt_at: request.next_attempt_at.clone(),
+            delivered_at: request.delivered_at.clone(),
+            error_message: request.error_message.clone(),
             created_at,
         })
     }
@@ -3591,6 +3645,11 @@ impl AtlasStore {
                 status,
                 payload_json,
                 response_body,
+                attempt_count,
+                last_attempt_at,
+                next_attempt_at,
+                delivered_at,
+                error_message,
                 created_at
             FROM alert_deliveries
             WHERE tenant_id = ?1 AND project_id = ?2
@@ -3610,7 +3669,12 @@ impl AtlasStore {
                     status: row_string(row, 4)?,
                     payload_json: row_string(row, 5)?,
                     response_body: row_optional_string(row, 6)?,
-                    created_at: row_string(row, 7)?,
+                    attempt_count: row_u64(row, 7)? as u32,
+                    last_attempt_at: row_optional_string(row, 8)?,
+                    next_attempt_at: row_optional_string(row, 9)?,
+                    delivered_at: row_optional_string(row, 10)?,
+                    error_message: row_optional_string(row, 11)?,
+                    created_at: row_string(row, 12)?,
                 })
             },
         )?;
@@ -3645,6 +3709,7 @@ impl AtlasStore {
             self.ensure_scope_columns(table)?;
         }
 
+        self.ensure_alert_delivery_lifecycle_columns()?;
         self.rebuild_saved_queries_if_needed()?;
         self.rebuild_finding_state_if_needed()?;
         Ok(())
@@ -3665,6 +3730,39 @@ impl AtlasStore {
             self.conn.execute_batch(&format!(
                 "ALTER TABLE {table} ADD COLUMN project_id TEXT NOT NULL DEFAULT 'default';"
             ))?;
+        }
+
+        Ok(())
+    }
+
+    fn ensure_alert_delivery_lifecycle_columns(&self) -> Result<()> {
+        let columns = self.read_table_info("alert_deliveries")?;
+        let names = columns.into_iter().map(|c| c.name).collect::<Vec<_>>();
+
+        if !names.iter().any(|c| c == "attempt_count") {
+            self.conn.execute_batch(
+                "ALTER TABLE alert_deliveries ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+
+        if !names.iter().any(|c| c == "last_attempt_at") {
+            self.conn
+                .execute_batch("ALTER TABLE alert_deliveries ADD COLUMN last_attempt_at TEXT;")?;
+        }
+
+        if !names.iter().any(|c| c == "next_attempt_at") {
+            self.conn
+                .execute_batch("ALTER TABLE alert_deliveries ADD COLUMN next_attempt_at TEXT;")?;
+        }
+
+        if !names.iter().any(|c| c == "delivered_at") {
+            self.conn
+                .execute_batch("ALTER TABLE alert_deliveries ADD COLUMN delivered_at TEXT;")?;
+        }
+
+        if !names.iter().any(|c| c == "error_message") {
+            self.conn
+                .execute_batch("ALTER TABLE alert_deliveries ADD COLUMN error_message TEXT;")?;
         }
 
         Ok(())
@@ -4071,7 +4169,7 @@ mod tests {
             .unwrap();
 
         store
-            .set_finding_operational_state_scoped(&scope, "f1", "acknowledged")
+            .set_finding_operational_state_scoped(&scope, "f1", "accepted")
             .unwrap();
         store
             .assign_finding_owner_scoped(&scope, "f1", "claudio")
@@ -4084,7 +4182,7 @@ mod tests {
             .get_finding_operational_state_scoped(&scope, "f1")
             .unwrap()
             .unwrap();
-        assert_eq!(state.operational_state, "acknowledged");
+        assert_eq!(state.operational_state, "accepted");
         assert_eq!(state.owner.as_deref(), Some("claudio"));
         assert_eq!(state.notes.as_deref(), Some("en revisión"));
     }
@@ -4108,7 +4206,7 @@ mod tests {
                 "finding.ack",
                 "finding",
                 "f-123",
-                &serde_json::json!({"state": "acknowledged"}),
+                &serde_json::json!({"state": "accepted"}),
             )
             .unwrap();
 
@@ -4243,6 +4341,11 @@ mod tests {
                     status: "delivered".to_string(),
                     payload: serde_json::json!({"ok": true}),
                     response_body: Some("accepted".to_string()),
+                    attempt_count: Some(1),
+                    last_attempt_at: Some(Utc::now().to_rfc3339()),
+                    next_attempt_at: None,
+                    delivered_at: Some(Utc::now().to_rfc3339()),
+                    error_message: None,
                 },
             )
             .unwrap();
@@ -4250,5 +4353,52 @@ mod tests {
         assert_eq!(delivery.channel, "webhook");
         let deliveries = store.list_alert_deliveries_scoped(&scope, 10).unwrap();
         assert_eq!(deliveries.len(), 1);
+        assert_eq!(deliveries[0].attempt_count, 1);
+    }
+
+    #[test]
+    fn repairs_alert_delivery_lifecycle_columns() {
+        let db_path = std::env::temp_dir().join(format!(
+            "atlas-store-alert-lifecycle-test-{}.db",
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+
+        let store = AtlasStore::open(&db_path).unwrap();
+
+        store
+            .conn
+            .execute_batch(
+                r#"
+                CREATE TABLE alert_deliveries (
+                    tenant_id TEXT NOT NULL,
+                    project_id TEXT NOT NULL,
+                    delivery_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    destination TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    response_body TEXT,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (tenant_id, project_id, delivery_id)
+                );
+                "#,
+            )
+            .unwrap();
+
+        store.ensure_alert_delivery_lifecycle_columns().unwrap();
+
+        let columns = store
+            .read_table_info("alert_deliveries")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect::<Vec<_>>();
+
+        assert!(columns.contains(&"attempt_count".to_string()));
+        assert!(columns.contains(&"last_attempt_at".to_string()));
+        assert!(columns.contains(&"next_attempt_at".to_string()));
+        assert!(columns.contains(&"delivered_at".to_string()));
+        assert!(columns.contains(&"error_message".to_string()));
     }
 }

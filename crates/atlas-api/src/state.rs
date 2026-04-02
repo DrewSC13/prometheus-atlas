@@ -11,12 +11,18 @@ pub struct AppState {
 
 impl AppState {
     pub fn from_config(config: AppConfig) -> Result<Arc<Self>> {
-        let store = AtlasStore::open(Path::new(&config.storage.path))?;
+        let storage_path = Path::new(&config.storage.path);
+
+        let store = AtlasStore::open(storage_path)?;
         store.initialize()?;
 
         Ok(Arc::new(Self {
             config,
             store: Mutex::new(store),
         }))
+    }
+
+    pub fn default_scope(&self) -> atlas_core::AtlasScope {
+        atlas_core::AtlasScope::global()
     }
 }

@@ -5,6 +5,8 @@ use axum::{
     Json,
 };
 
+use atlas_core::IncidentState;
+
 use crate::{
     auth::{default_limit, scope_from_auth, AuthContext},
     error::{ApiError, ApiResult},
@@ -17,7 +19,7 @@ use crate::{
 
 #[derive(Debug, serde::Deserialize)]
 pub struct IncidentParams {
-    pub state: Option<String>,
+    pub state: Option<IncidentState>,
     pub owner: Option<String>,
     pub severity: Option<String>,
     pub source_kind: Option<String>,
@@ -52,7 +54,7 @@ pub async fn list_incidents(
 
     let mut items = store.list_incidents_scoped(
         &scope,
-        params.state.as_deref(),
+        params.state.map(|s| s.as_str()),
         params.owner.as_deref(),
         fetch_limit,
     )?;
@@ -191,9 +193,9 @@ pub async fn patch_incident(
         .get_incident_scoped(&scope, &incident_id)?
         .ok_or_else(|| ApiError::not_found("incident no encontrado"))?;
 
-    if let Some(state_value) = body.state.as_deref() {
-        store.set_incident_state_scoped(&scope, &incident_id, state_value)?;
-        changes.push(format!("state={state_value}"));
+    if let Some(state_value) = body.state {
+        store.set_incident_state_scoped(&scope, &incident_id, state_value.as_str())?;
+        changes.push(format!("state={}", state_value.as_str()));
     }
 
     if let Some(owner) = body.owner.as_deref() {
@@ -228,7 +230,14 @@ pub async fn ack_incident(
     auth: AuthContext,
     Path(incident_id): Path<String>,
 ) -> ApiResult<Json<ApiEnvelope<serde_json::Value>>> {
-    set_incident_state(state, auth, incident_id, "acknowledged", "incident.ack").await
+    set_incident_state(
+        state,
+        auth,
+        incident_id,
+        IncidentState::Acknowledged,
+        "incident.ack",
+    )
+    .await
 }
 
 pub async fn resolve_incident(
@@ -236,7 +245,14 @@ pub async fn resolve_incident(
     auth: AuthContext,
     Path(incident_id): Path<String>,
 ) -> ApiResult<Json<ApiEnvelope<serde_json::Value>>> {
-    set_incident_state(state, auth, incident_id, "resolved", "incident.resolve").await
+    set_incident_state(
+        state,
+        auth,
+        incident_id,
+        IncidentState::Resolved,
+        "incident.resolve",
+    )
+    .await
 }
 
 pub async fn assign_incident(
@@ -344,7 +360,7 @@ async fn set_incident_state(
     state: Arc<AppState>,
     auth: AuthContext,
     incident_id: String,
-    incident_state: &'static str,
+    incident_state: IncidentState,
     audit_action: &'static str,
 ) -> ApiResult<Json<ApiEnvelope<serde_json::Value>>> {
     auth.require_write()?;
@@ -359,20 +375,20 @@ async fn set_incident_state(
         .get_incident_scoped(&scope, &incident_id)?
         .ok_or_else(|| ApiError::not_found("incident no encontrado"))?;
 
-    store.set_incident_state_scoped(&scope, &incident_id, incident_state)?;
+    store.set_incident_state_scoped(&scope, &incident_id, incident_state.as_str())?;
     store.record_audit_event_scoped(
         &scope,
         &auth.subject,
         audit_action,
         "incident",
         &incident_id,
-        &serde_json::json!({ "state": incident_state }),
+        &serde_json::json!({ "state": incident_state.as_str() }),
     )?;
 
     Ok(Json(ApiEnvelope {
         data: serde_json::json!({
             "incident_id": incident_id,
-            "state": incident_state
+            "state": incident_state.as_str()
         }),
     }))
 }

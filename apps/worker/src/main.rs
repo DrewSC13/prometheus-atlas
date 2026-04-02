@@ -8,6 +8,7 @@ use atlas_snapshot::Snapshot;
 use atlas_store::{
     AlertDeliveryRequest, AtlasStore, StorageScope, StoredAlertDelivery, StoredIncident,
 };
+use chrono::Utc;
 use clap::Parser;
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -508,15 +509,33 @@ async fn deliver_incident_alerts(
             Err(err) => ("failed".to_string(), Some(err.to_string())),
         };
 
+        let now = Utc::now();
         deliveries.push(store.record_alert_delivery_scoped(
             scope,
             &AlertDeliveryRequest {
                 channel: "webhook".to_string(),
                 destination: url.clone(),
                 event_type: event_type.to_string(),
-                status,
+                status: status.clone(),
                 payload: payload.clone(),
-                response_body,
+                response_body: response_body.clone(),
+                attempt_count: Some(1),
+                last_attempt_at: Some(now.to_rfc3339()),
+                next_attempt_at: if status.eq_ignore_ascii_case("failed") {
+                    Some((now + chrono::Duration::seconds(30)).to_rfc3339())
+                } else {
+                    None
+                },
+                delivered_at: if status.eq_ignore_ascii_case("delivered") {
+                    Some(now.to_rfc3339())
+                } else {
+                    None
+                },
+                error_message: if status.eq_ignore_ascii_case("failed") {
+                    response_body.clone()
+                } else {
+                    None
+                },
             },
         )?);
     }
@@ -543,15 +562,33 @@ async fn deliver_incident_alerts(
             Err(err) => ("failed".to_string(), Some(err.to_string())),
         };
 
+        let now = Utc::now();
         deliveries.push(store.record_alert_delivery_scoped(
             scope,
             &AlertDeliveryRequest {
                 channel: "slack".to_string(),
                 destination: url.clone(),
                 event_type: event_type.to_string(),
-                status,
+                status: status.clone(),
                 payload: slack_payload.clone(),
-                response_body,
+                response_body: response_body.clone(),
+                attempt_count: Some(1),
+                last_attempt_at: Some(now.to_rfc3339()),
+                next_attempt_at: if status.eq_ignore_ascii_case("failed") {
+                    Some((now + chrono::Duration::seconds(30)).to_rfc3339())
+                } else {
+                    None
+                },
+                delivered_at: if status.eq_ignore_ascii_case("delivered") {
+                    Some(now.to_rfc3339())
+                } else {
+                    None
+                },
+                error_message: if status.eq_ignore_ascii_case("failed") {
+                    response_body.clone()
+                } else {
+                    None
+                },
             },
         )?);
     }
@@ -568,6 +605,11 @@ async fn deliver_incident_alerts(
                 response_body: Some(
                     "email transport no implementado; delivery registrada".to_string(),
                 ),
+                attempt_count: Some(0),
+                last_attempt_at: None,
+                next_attempt_at: None,
+                delivered_at: None,
+                error_message: None,
             },
         )?);
     }

@@ -1,3 +1,4 @@
+use atlas_core::AtlasScope;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -162,20 +163,61 @@ impl Membership {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TenancyScope {
-    pub organization_id: String,
-    pub workspace_id: String,
+    pub tenant_id: String,
+    pub project_id: String,
 }
 
 impl TenancyScope {
-    pub fn new(organization_id: impl Into<String>, workspace_id: impl Into<String>) -> Self {
+    pub fn new(tenant_id: impl Into<String>, project_id: impl Into<String>) -> Self {
         Self {
-            organization_id: organization_id.into(),
-            workspace_id: workspace_id.into(),
+            tenant_id: tenant_id.into(),
+            project_id: project_id.into(),
         }
     }
 
+    pub fn from_org_workspace(
+        organization_id: impl Into<String>,
+        workspace_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            tenant_id: organization_id.into(),
+            project_id: workspace_id.into(),
+        }
+    }
+
+    pub fn organization_id(&self) -> &str {
+        &self.tenant_id
+    }
+
+    pub fn workspace_id(&self) -> &str {
+        &self.project_id
+    }
+
     pub fn to_legacy_ids(&self) -> (&str, &str) {
-        (&self.organization_id, &self.workspace_id)
+        (&self.tenant_id, &self.project_id)
+    }
+
+    pub fn validate(&self) -> Result<(), String> {
+        AtlasScope::new(self.tenant_id.clone(), self.project_id.clone()).validate()
+    }
+
+    pub fn to_core_scope(&self) -> AtlasScope {
+        AtlasScope::new(self.tenant_id.clone(), self.project_id.clone())
+    }
+}
+
+impl From<AtlasScope> for TenancyScope {
+    fn from(value: AtlasScope) -> Self {
+        Self {
+            tenant_id: value.tenant_id,
+            project_id: value.project_id,
+        }
+    }
+}
+
+impl From<TenancyScope> for AtlasScope {
+    fn from(value: TenancyScope) -> Self {
+        AtlasScope::new(value.tenant_id, value.project_id)
     }
 }
 
@@ -211,5 +253,26 @@ mod tests {
         assert_eq!(membership.organization_id, org.organization_id);
         assert_eq!(membership.workspace_id, ws.workspace_id);
         assert_eq!(membership.user_id, user.user_id);
+    }
+
+    #[test]
+    fn tenancy_scope_maps_org_workspace_to_tenant_project() {
+        let scope = TenancyScope::from_org_workspace("org-1", "ws-1");
+        assert_eq!(scope.tenant_id, "org-1");
+        assert_eq!(scope.project_id, "ws-1");
+        assert_eq!(scope.organization_id(), "org-1");
+        assert_eq!(scope.workspace_id(), "ws-1");
+    }
+
+    #[test]
+    fn tenancy_scope_converts_to_core_scope() {
+        let tenancy = TenancyScope::new("tenant-a", "project-x");
+        let core: AtlasScope = tenancy.clone().into();
+
+        assert_eq!(core.tenant_id, "tenant-a");
+        assert_eq!(core.project_id, "project-x");
+
+        let roundtrip = TenancyScope::from(core);
+        assert_eq!(roundtrip, tenancy);
     }
 }

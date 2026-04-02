@@ -1,3 +1,4 @@
+use atlas_core::{IncidentState, OperationalState};
 use atlas_jobs::AtlasJob;
 use atlas_queue::{JobExecutionRecord, JobQueueItem};
 use atlas_risk::{
@@ -53,21 +54,21 @@ pub struct FindingsQuery {
     pub target: String,
     pub severity: Option<String>,
     pub state: Option<String>,
-    pub operational_state: Option<String>,
+    pub operational_state: Option<OperationalState>,
     pub owner: Option<String>,
     pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct FindingPatchRequest {
-    pub operational_state: Option<String>,
+    pub operational_state: Option<OperationalState>,
     pub owner: Option<String>,
     pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IncidentPatchRequest {
-    pub state: Option<String>,
+    pub state: Option<IncidentState>,
     pub owner: Option<String>,
     pub notes: Option<String>,
 }

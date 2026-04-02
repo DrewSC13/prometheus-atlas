@@ -1,21 +1,18 @@
 [package]
 name = "atlas-store"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-authors.workspace = true
-repository.workspace = true
+version = "0.30.0"
+edition = "2021"
 
 [dependencies]
-anyhow.workspace = true
-chrono.workspace = true
-hex.workspace = true
-rusqlite.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
-uuid.workspace = true
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+rusqlite = { version = "0.30", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
 
+atlas-core = { path = "../atlas-core" }
 atlas-drift = { path = "../atlas-drift" }
 atlas-episodes = { path = "../atlas-episodes" }
 atlas-graph = { path = "../atlas-graph" }

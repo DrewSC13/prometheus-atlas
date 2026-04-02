@@ -1,12 +1,10 @@
 [package]
 name = "atlas-tenancy"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-authors.workspace = true
-repository.workspace = true
+version = "0.30.0"
+edition = "2021"
 
 [dependencies]
-chrono.workspace = true
-serde.workspace = true
-uuid.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+atlas-core = { path = "../atlas-core" }

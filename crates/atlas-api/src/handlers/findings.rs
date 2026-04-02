@@ -5,6 +5,8 @@ use axum::{
     Json,
 };
 
+use atlas_core::OperationalState;
+
 use crate::{
     auth::{default_limit, scope_from_auth, AuthContext},
     error::{ApiError, ApiResult},
@@ -25,7 +27,7 @@ pub struct FindingsParams {
 pub struct CurrentFindingsParams {
     pub severity: Option<String>,
     pub state: Option<String>,
-    pub operational_state: Option<String>,
+    pub operational_state: Option<OperationalState>,
     pub owner: Option<String>,
     pub limit: Option<usize>,
 }
@@ -92,7 +94,7 @@ pub async fn list_current_findings(
         &target,
         params.severity.as_deref(),
         params.state.as_deref(),
-        params.operational_state.as_deref(),
+        params.operational_state.map(|s| s.as_str()),
         params.owner.as_deref(),
     )?;
     items.truncate(limit);
@@ -121,9 +123,9 @@ pub async fn patch_finding(
         .lock()
         .map_err(|_| ApiError::internal("store lock"))?;
 
-    if let Some(op_state) = payload.operational_state.as_deref() {
-        store.set_finding_operational_state_scoped(&scope, &finding_id, op_state)?;
-        changes.push(format!("operational_state={op_state}"));
+    if let Some(op_state) = payload.operational_state {
+        store.set_finding_operational_state_scoped(&scope, &finding_id, op_state.as_str())?;
+        changes.push(format!("operational_state={}", op_state.as_str()));
     }
 
     if let Some(owner) = payload.owner.as_deref() {
@@ -158,7 +160,14 @@ pub async fn ack_finding(
     auth: AuthContext,
     Path(finding_id): Path<String>,
 ) -> ApiResult<Json<ApiEnvelope<serde_json::Value>>> {
-    set_finding_state(state, auth, finding_id, "acknowledged", "finding.ack").await
+    set_finding_state(
+        state,
+        auth,
+        finding_id,
+        OperationalState::Accepted,
+        "finding.ack",
+    )
+    .await
 }
 
 pub async fn resolve_finding(
@@ -166,7 +175,14 @@ pub async fn resolve_finding(
     auth: AuthContext,
     Path(finding_id): Path<String>,
 ) -> ApiResult<Json<ApiEnvelope<serde_json::Value>>> {
-    set_finding_state(state, auth, finding_id, "resolved", "finding.resolve").await
+    set_finding_state(
+        state,
+        auth,
+        finding_id,
+        OperationalState::Mitigated,
+        "finding.resolve",
+    )
+    .await
 }
 
 pub async fn accept_finding(
@@ -174,14 +190,21 @@ pub async fn accept_finding(
     auth: AuthContext,
     Path(finding_id): Path<String>,
 ) -> ApiResult<Json<ApiEnvelope<serde_json::Value>>> {
-    set_finding_state(state, auth, finding_id, "accepted", "finding.accept").await
+    set_finding_state(
+        state,
+        auth,
+        finding_id,
+        OperationalState::Accepted,
+        "finding.accept",
+    )
+    .await
 }
 
 async fn set_finding_state(
     state: Arc<AppState>,
     auth: AuthContext,
     finding_id: String,
-    op_state: &'static str,
+    op_state: OperationalState,
     audit_action: &'static str,
 ) -> ApiResult<Json<ApiEnvelope<serde_json::Value>>> {
     auth.require_write()?;
@@ -192,20 +215,20 @@ async fn set_finding_state(
         .lock()
         .map_err(|_| ApiError::internal("store lock"))?;
 
-    store.set_finding_operational_state_scoped(&scope, &finding_id, op_state)?;
+    store.set_finding_operational_state_scoped(&scope, &finding_id, op_state.as_str())?;
     store.record_audit_event_scoped(
         &scope,
         &auth.subject,
         audit_action,
         "finding",
         &finding_id,
-        &serde_json::json!({ "operational_state": op_state }),
+        &serde_json::json!({ "operational_state": op_state.as_str() }),
     )?;
 
     Ok(Json(ApiEnvelope {
         data: serde_json::json!({
             "finding_id": finding_id,
-            "operational_state": op_state
+            "operational_state": op_state.as_str()
         }),
     }))
 }

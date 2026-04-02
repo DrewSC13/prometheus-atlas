@@ -5,6 +5,8 @@ use axum::{
     Json,
 };
 
+use atlas_core::{AlertChannelKind, AlertDeliveryStatus};
+
 use crate::{
     auth::{default_limit, scope_from_auth, AuthContext},
     error::{ApiError, ApiResult},
@@ -14,8 +16,8 @@ use crate::{
 
 #[derive(Debug, serde::Deserialize)]
 pub struct AlertParams {
-    pub channel: Option<String>,
-    pub status: Option<String>,
+    pub channel: Option<AlertChannelKind>,
+    pub status: Option<AlertDeliveryStatus>,
     pub event_type: Option<String>,
     pub limit: Option<usize>,
 }
@@ -35,12 +37,12 @@ pub async fn list_alert_deliveries(
         .map_err(|_| ApiError::internal("store lock"))?;
     let mut items = store.list_alert_deliveries_scoped(&scope, limit)?;
 
-    if let Some(channel) = params.channel.as_deref() {
-        items.retain(|item| item.channel.eq_ignore_ascii_case(channel));
+    if let Some(channel) = params.channel {
+        items.retain(|item| item.channel.eq_ignore_ascii_case(channel.as_str()));
     }
 
-    if let Some(status) = params.status.as_deref() {
-        items.retain(|item| item.status.eq_ignore_ascii_case(status));
+    if let Some(status) = params.status {
+        items.retain(|item| item.status.eq_ignore_ascii_case(status.as_str()));
     }
 
     if let Some(event_type) = params.event_type.as_deref() {

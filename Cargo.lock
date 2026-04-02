@@ -418,6 +418,7 @@ name = "atlas-store"
 version = "0.30.0"
 dependencies = [
  "anyhow",
+ "atlas-core",
  "atlas-drift",
  "atlas-episodes",
  "atlas-graph",
@@ -431,13 +432,13 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "uuid",
 ]
 
 [[package]]
 name = "atlas-tenancy"
 version = "0.30.0"
 dependencies = [
+ "atlas-core",
  "chrono",
  "serde",
  "uuid",
